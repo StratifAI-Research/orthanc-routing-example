@@ -1,0 +1,36 @@
+version: "3.3"
+services:
+
+  orthanc-viewer:
+    build: server
+    ports: ["8000:8042","2000:4242"]
+    container_name: orthanc-viewer
+    hostname: orthanc-viewer
+
+    volumes:
+        - ./server/orthanc.json:/etc/orthanc/orthanc.json
+        - ./server/router.py:/python/router.py
+    environment:
+      ORTHANC__NAME: "orthanc-viewer"
+
+      VERBOSE_ENABLED: "true"
+      VERBOSE_STARTUP: "true"
+      ORTHANC__PYTHON_SCRIPT: "/python/router.py"
+      ORTHANC__PYTHON_VERBOSE: "true"
+
+  orthanc-ai:
+    build: AI_inference
+    ports: ["8001:8042","2001:4242"]
+    container_name: orthanc-ai
+    hostname: orthanc-ai
+
+    volumes:
+        - ./AI_inference/orthanc.json:/etc/orthanc/orthanc.json
+        - ./AI_inference/server.py:/python/server.py
+    environment:
+      ORTHANC__NAME: "orthanc-ai"
+
+      VERBOSE_ENABLED: "true"
+      VERBOSE_STARTUP: "true"
+      ORTHANC__PYTHON_SCRIPT: "/python/server.py"
+      ORTHANC__PYTHON_VERBOSE: "true"
