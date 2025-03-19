@@ -3,7 +3,12 @@
 A demo project showcasing DICOM study routing between Orthanc servers, with automatic forwarding to an AI inference server when studies stabilize.
 
 ## Quick Test Guide
-
+### 0. Clone and start containers
+```bash
+git clone https://github.com/Luab/orthanc-routing-example
+cd orthanc-routing-example
+docker-compose up --build
+```
 ### 1. Upload Studies to Routing Server
 
 Use the Orthanc Explorer web interface at http://localhost:8000/app/explorer.html#upload to upload DICOM studies.
