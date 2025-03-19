@@ -1,97 +1,172 @@
-import uuid
+import io
+import json
 
 import numpy as np
 import orthanc
 import requests
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont
 from pydicom import dcmread
-from pydicom._storage_sopclass_uids import SecondaryCaptureImageStorage
 from pydicom.dataset import Dataset, FileMetaDataset
-from pydicom.uid import ExplicitVRLittleEndian, generate_uid
+from pydicom.uid import (
+    ExplicitVRLittleEndian,
+    SecondaryCaptureImageStorage,
+    generate_uid,
+)
 
 
-def create_mock_ai_response(original_dicom_path, output_path):
+def add_text_overlay(pixel_array, text="PROCESSED BY AI"):
     """
-    Creates a mock AI response DICOM file based on the original DICOM file.
+    Adds a large red text overlay to the pixel array.
+    Handles multi-frame (4D) and single-frame (2D/3D) DICOM.
     """
-    # Load the original DICOM file
-    original_dicom = dcmread(original_dicom_path)
+    # Handle multi-frame DICOM (4D array: frames, height, width, channels)
+    if len(pixel_array.shape) == 4:
+        processed_frames = []
+        for frame in pixel_array:
+            im = Image.fromarray(frame)
+            draw = ImageDraw.Draw(im)
 
-    # Create a new DICOM dataset
+            # Load font
+            try:
+                font = ImageFont.truetype("arial.ttf", size=50)
+            except IOError:
+                font = ImageFont.load_default()
+
+            # Calculate text position using textbbox
+            bbox = draw.textbbox((0, 0), text, font=font)
+            text_width = bbox[2] - bbox[0]
+            text_height = bbox[3] - bbox[1]
+            position = ((im.width - text_width) // 2, (im.height - text_height) // 2)
+
+            # Add overlay
+            draw.text(position, text, fill="red", font=font)
+            processed_frames.append(np.array(im))
+
+        return np.stack(processed_frames)
+
+    # Handle single-frame DICOM
+    else:
+        if len(pixel_array.shape) == 2:
+            im = Image.fromarray(pixel_array).convert("RGB")
+        else:
+            im = Image.fromarray(pixel_array)
+
+        draw = ImageDraw.Draw(im)
+        try:
+            font = ImageFont.truetype("arial.ttf", size=50)
+        except IOError:
+            font = ImageFont.load_default()
+
+        # Calculate text position using textbbox
+        bbox = draw.textbbox((0, 0), text, font=font)
+        text_width = bbox[2] - bbox[0]
+        text_height = bbox[3] - bbox[1]
+        position = ((im.width - text_width) // 2, (im.height - text_height) // 2)
+
+        draw.text(position, text, fill="red", font=font)
+        return np.array(im)
+
+
+def create_mock_ai_dicom(original_dicom):
+    """Creates mock AI DICOM dataset in memory"""
     ds = Dataset()
     meta = FileMetaDataset()
     meta.TransferSyntaxUID = ExplicitVRLittleEndian
     ds.file_meta = meta
 
-    # Copy metadata from the original DICOM
-    ds.PatientName = original_dicom.PatientName
-    ds.PatientID = original_dicom.PatientID
-    ds.PatientBirthDate = original_dicom.PatientBirthDate
-    ds.PatientSex = original_dicom.PatientSex
-    ds.StudyInstanceUID = original_dicom.StudyInstanceUID
-    ds.StudyDate = original_dicom.StudyDate
-    ds.StudyTime = original_dicom.StudyTime
-    ds.ReferringPhysicianName = None
-    ds.StudyID = original_dicom.StudyID
-    ds.AccessionNumber = None
+    # Copy metadata
+    for tag in [
+        "PatientName",
+        "PatientID",
+        "PatientBirthDate",
+        "PatientSex",
+        "StudyInstanceUID",
+        "StudyDate",
+        "StudyTime",
+        "StudyID",
+    ]:
+        setattr(ds, tag, getattr(original_dicom, tag, None))
 
-    # Add new data for the mock AI response
-    ds.Modality = "SC"  # Secondary Capture
+    # Set derived attributes
+    ds.Modality = "SC"
     ds.SeriesInstanceUID = generate_uid()
-    ds.SeriesNumber = None
-    ds.ConversionType = "DF"  # Derived from original
-    ds.InstanceNumber = None
+    ds.ConversionType = "DF"
+    ds.SOPClassUID = SecondaryCaptureImageStorage
+    ds.SOPInstanceUID = generate_uid()
 
-    # Add a mock image (e.g., a placeholder image)
-    im = Image.open("sample_data/image.png")  # Replace with your mock image
-    arr = np.asarray(im)
-    arr = arr[:, :, :3]  # Remove alpha channel if present
-    arr = np.stack((arr, arr))  # Create multiple frames
-    ds.NumberOfFrames, ds.Rows, ds.Columns, ds.SamplesPerPixel = arr.shape
+    # Process pixel data
+    pixel_array = original_dicom.pixel_array
+    processed_pixel_array = add_text_overlay(pixel_array)  # Correct variable name
+
+    # Handle different array dimensions
+    if len(processed_pixel_array.shape) == 4:  # Use correct variable name
+        ds.NumberOfFrames = processed_pixel_array.shape[0]
+        ds.Rows = processed_pixel_array.shape[1]
+        ds.Columns = processed_pixel_array.shape[2]
+        ds.SamplesPerPixel = processed_pixel_array.shape[3]
+    else:
+        ds.Rows, ds.Columns, ds.SamplesPerPixel = (
+            processed_pixel_array.shape
+        )  # Correct name
+
+    # Set pixel data attributes
     ds.PhotometricInterpretation = "RGB"
     ds.BitsAllocated = 8
     ds.BitsStored = 8
     ds.HighBit = 7
     ds.PixelRepresentation = 0
     ds.PlanarConfiguration = 0
-    ds.PixelData = arr.tobytes()
+    ds.PixelData = processed_pixel_array.tobytes()  # Correct name
 
-    # Set SOP Class and Instance UIDs
-    ds.SOPClassUID = SecondaryCaptureImageStorage
-    ds.SOPInstanceUID = generate_uid()
+    # Write to in-memory buffer
+    buffer = io.BytesIO()
+    ds.save_as(buffer)
+    return buffer.getvalue()
 
-    # Save the mock AI response as a new DICOM file
-    ds.save_as(output_path, write_like_original=False)
 
-def SendAIResult(changeType, level, resourceId):
-    """
-    Callback function triggered when a study becomes stable.
-    Creates a mock AI response and sends it back to the orthanc-viewer instance.
-    """
+def OnStableStudy(changeType, level, resourceId):
     if changeType == orthanc.ChangeType.STABLE_STUDY:
-        print(f"Stable study: {resourceId}")
+        print(f"Processing stable study: {resourceId}")
 
-        # Download the original study from Orthanc
-        original_dicom_path = f"/tmp/{resourceId}.dcm"
-        with open(original_dicom_path, "wb") as f:
-            f.write(orthanc.RestApiGet(f"/studies/{resourceId}/archive"))
+        try:
+            # Get study instances
+            instances = json.loads(
+                orthanc.RestApiGet(f"/studies/{resourceId}/instances")
+            )
+            if not instances:
+                print(f"No instances in study {resourceId}")
+                return
 
-        # Create a mock AI response
-        mock_response_path = f"/tmp/mock_ai_{resourceId}.dcm"
-        create_mock_ai_response(original_dicom_path, mock_response_path)
+            # Process first instance
+            instance_id = instances[0]["ID"]
+            dicom_buffer = orthanc.GetDicomForInstance(instance_id)
+            original_dicom = dcmread(io.BytesIO(dicom_buffer))
 
-        # Send the mock AI response back to the orthanc-viewer instance
-        with open(mock_response_path, "rb") as f:
+            # Generate and send AI response
+            mock_dicom_bytes = create_mock_ai_dicom(original_dicom)
+
+            # Use direct requests call
             response = requests.post(
-                url="http://orthanc-viewer:8042/instances",
-                data=f.read(),
-                headers={"Content-Type": "application/dicom"}
+                "http://orthanc-viewer:8042/instances",
+                data=mock_dicom_bytes,
+                headers={"Content-Type": "application/dicom"},
+                timeout=10,
             )
 
-        if response.status_code == 200:
-            print(f"Mock AI response sent successfully for study {resourceId}")
-        else:
-            print(f"Failed to send mock AI response for study {resourceId}: {response.status_code}")
+            # Simplified status check
+            if response.status_code == 200:
+                print(
+                    f"AI response successfully stored (Status: {response.status_code})"
+                )
+            else:
+                print(f"Failed to store AI response (Status: {response.status_code})")
+                print(f"Response content: {response.text[:200]}")  # Truncated for logs
+
+        except requests.exceptions.RequestException as e:
+            print(f"Network error processing study {resourceId}: {str(e)}")
+        except Exception as e:
+            print(f"General error processing study {resourceId}: {str(e)}")
+
 
 # Register the callback function
-orthanc.RegisterOnChangeCallback(SendAIResult)
+orthanc.RegisterOnChangeCallback(OnStableStudy)
