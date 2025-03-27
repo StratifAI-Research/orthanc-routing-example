@@ -1,5 +1,7 @@
+import datetime
 import io
 import json
+from datetime import datetime
 
 import numpy as np
 import orthanc
@@ -7,10 +9,14 @@ import requests
 from PIL import Image, ImageDraw, ImageFont
 from pydicom import dcmread
 from pydicom.dataset import Dataset, FileMetaDataset
+from pydicom import dcmread, Dataset, FileDataset
+from pydicom.sequence import Sequence
+from pydicom.uid import generate_uid, ExplicitVRLittleEndian
 from pydicom.uid import (
     ExplicitVRLittleEndian,
     SecondaryCaptureImageStorage,
     generate_uid,
+    ComprehensiveSRStorage
 )
 
 
@@ -124,6 +130,119 @@ def create_mock_ai_dicom(original_dicom):
     return buffer.getvalue()
 
 
+def create_sr_report(original_ds, classification_result):
+    """Create DICOM Structured Report (SR) for classification results in memory"""
+    # File meta info
+    file_meta = Dataset()
+    file_meta.MediaStorageSOPClassUID = ComprehensiveSRStorage
+    file_meta.MediaStorageSOPInstanceUID = generate_uid()
+    file_meta.TransferSyntaxUID = ExplicitVRLittleEndian
+
+    ds = FileDataset(None, {}, file_meta=file_meta, preamble=b"\0" * 128)
+    
+    # Basic patient/study identification (link to original study)
+    ds.PatientName = original_ds.PatientName
+    ds.PatientID = original_ds.PatientID
+    ds.StudyInstanceUID = original_ds.StudyInstanceUID
+    ds.SeriesInstanceUID = generate_uid()  # New UID for SR series
+    ds.SOPInstanceUID = file_meta.MediaStorageSOPInstanceUID
+    
+    # SR-specific attributes
+    ds.Modality = 'SR'
+    ds.SOPClassUID = ComprehensiveSRStorage
+    ds.StudyDescription = "AI Classification Report"
+    ds.SeriesDescription = "Automated Diagnostic Findings"
+    ds.InstanceCreationDate = datetime.now().strftime('%Y%m%d')
+    ds.InstanceCreationTime = datetime.now().strftime('%H%M%S')
+
+    # Create content sequence for structured reporting
+    content_sequence = Sequence()
+
+    # 1. Root container
+    root_container = Dataset()
+    root_container.ValueType = 'CONTAINER'
+    root_container.ConceptNameCodeSequence = [create_code_sequence(
+        code_value='18748-4',  # LOINC code for Diagnostic Imaging Report
+        coding_scheme='LN',
+        code_meaning='Diagnostic Imaging Report'
+    )]
+    root_container.ContinuityOfContent = 'SEPARATE'
+
+    # 2. Classification result
+    finding_item = Dataset()
+    finding_item.ValueType = 'CODE'
+    finding_item.ConceptNameCodeSequence = [create_code_sequence(
+        code_value='R-00339',  # SNOMED CT Observable Entity
+        coding_scheme='SRT',
+        code_meaning='Probability'
+    )]
+    finding_item.ConceptCodeSequence = [create_code_sequence(
+        code_value='108369006' if classification_result['benign'] else '86049000',
+        coding_scheme='SCT',
+        code_meaning='Benign' if classification_result['benign'] else 'Malignant'
+    )]
+    finding_item.MeasuredValueSequence = [create_measurement(
+        value=classification_result['confidence'],
+        unit='%',
+        code_value='%',
+        coding_scheme='UCUM'
+    )]
+
+    # 3. AI Model metadata
+    model_metadata = Dataset()
+    model_metadata.ValueType = 'CODE'
+    model_metadata.ConceptNameCodeSequence = [create_code_sequence(
+        code_value='12710003',  # SCT code for "Algorithm"
+        coding_scheme='SCT',
+        code_meaning='AI Model'
+    )]
+    model_metadata.TextValue = "Classification Model v1.0"
+    model_metadata.AlgorithmName = "ResNet-50"
+    model_metadata.AlgorithmVersion = "1.2.3"
+
+    # Assemble the structure
+    root_container.ContentSequence = [finding_item, model_metadata]
+    content_sequence.append(root_container)
+    ds.ContentSequence = content_sequence
+
+    # Referenced images (link to original study)
+    ref_image_sequence = Sequence()
+    ref_image = Dataset()
+    ref_image.ReferencedSOPClassUID = original_ds.SOPClassUID
+    ref_image.ReferencedSOPInstanceUID = original_ds.SOPInstanceUID
+    ref_image_sequence.append(ref_image)
+    ds.ReferencedImageSequence = ref_image_sequence
+
+    # Write to in-memory buffer instead of file
+    buffer = io.BytesIO()
+    ds.save_as(buffer)
+    return buffer.getvalue()
+
+def create_code_sequence(code_value, coding_scheme, code_meaning):
+    """Helper to create coded entries"""
+    code_seq = Dataset()
+    code_seq.CodeValue = code_value
+    code_seq.CodingSchemeDesignator = coding_scheme
+    code_seq.CodeMeaning = code_meaning
+    return code_seq
+
+def create_measurement(value, unit, code_value, coding_scheme):
+    """Helper for numeric measurements"""
+    measurement = Dataset()
+    measurement.NumericValue = value
+    measurement.MeasurementUnitsCodeSequence = [create_code_sequence(
+        code_value=code_value,
+        coding_scheme=coding_scheme,
+        code_meaning=unit
+    )]
+    return measurement
+# Generate mock AI outputs
+mock_classification = {
+    'benign': True,
+    'confidence': 95.7,
+    'model_version': '1.0'
+}
+
 def OnStableStudy(changeType, level, resourceId):
     if changeType == orthanc.ChangeType.STABLE_STUDY:
         print(f"Processing stable study: {resourceId}")
@@ -142,25 +261,24 @@ def OnStableStudy(changeType, level, resourceId):
             dicom_buffer = orthanc.GetDicomForInstance(instance_id)
             original_dicom = dcmread(io.BytesIO(dicom_buffer))
 
-            # Generate and send AI response
-            mock_dicom_bytes = create_mock_ai_dicom(original_dicom)
+            # Generate both SC and SR responses
+            mock_sc_bytes = create_mock_ai_dicom(original_dicom)
+            mock_sr_bytes = create_sr_report(original_dicom, mock_classification)
 
-            # Use direct requests call
-            response = requests.post(
-                "http://orthanc-viewer:8042/instances",
-                data=mock_dicom_bytes,
-                headers={"Content-Type": "application/dicom"},
-                timeout=10,
-            )
-
-            # Simplified status check
-            if response.status_code == 200:
-                print(
-                    f"AI response successfully stored (Status: {response.status_code})"
+            # Send both files to Orthanc
+            for dicom_bytes, desc in [(mock_sc_bytes, "SC"), (mock_sr_bytes, "SR")]:
+                response = requests.post(
+                    "http://orthanc-viewer:8042/instances",
+                    data=dicom_bytes,
+                    headers={"Content-Type": "application/dicom"},
+                    timeout=10,
                 )
-            else:
-                print(f"Failed to store AI response (Status: {response.status_code})")
-                print(f"Response content: {response.text[:200]}")  # Truncated for logs
+
+                if response.status_code == 200:
+                    print(f"AI {desc} response successfully stored (Status: {response.status_code})")
+                else:
+                    print(f"Failed to store AI {desc} response (Status: {response.status_code})")
+                    print(f"Response content: {response.text[:200]}")  # Truncated for logs
 
         except requests.exceptions.RequestException as e:
             print(f"Network error processing study {resourceId}: {str(e)}")

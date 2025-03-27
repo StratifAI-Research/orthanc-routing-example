@@ -84,6 +84,5 @@ def SendToAi(output, uri, **request):
         }
         output.AnswerBuffer(json.dumps(error_response), 'application/json')
 
-
 # Register the REST endpoint
 orthanc.RegisterRestCallback('/send-to-ai', SendToAi)
