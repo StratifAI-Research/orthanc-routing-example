@@ -17,6 +17,8 @@ services:
       VERBOSE_STARTUP: "true"
       ORTHANC__PYTHON_SCRIPT: "/python/router.py"
       ORTHANC__PYTHON_VERBOSE: "true"
+    networks:
+      - orthanc_net
 
   orthanc-ai:
     build: AI_inference
@@ -34,3 +36,9 @@ services:
       VERBOSE_STARTUP: "true"
       ORTHANC__PYTHON_SCRIPT: "/python/server.py"
       ORTHANC__PYTHON_VERBOSE: "true"
+    networks:
+      - orthanc_net
+
+networks:
+  orthanc_net:
+    driver: bridge
