@@ -24,6 +24,9 @@ Use the Orthanc Explorer web interface at http://localhost:8000/app/explorer.htm
 ![Routing Server Studies](screenshots/routing-server-studies.png)  
 *Studies list in Orthanc Viewer*
 
+![Original series](screenshots/original-series.png)  
+*Original series in Orthanc Viewer*
+
 ---
 
 ### 3. Check AI Server Reception
@@ -33,3 +36,18 @@ Use the Orthanc Explorer web interface at http://localhost:8000/app/explorer.htm
 *Received studies in AI Orthanc*
 
 2. Check processing status in the AI server interface.
+
+### 4. Check acquired AI results
+
+1. Two new processed studies
+![With AI results](screenshots/with_ai_results.jpg)
+*Received mock AI results in Orthanc Viewer* 
+
+2. Edited image sequence
+![image sequence](screenshots/mock_ai_processed.jpg)
+*Received mock visual AI result in Orthanc Viewer* 
+
+
+3. Structure report generated
+![SR sequence](screenshots/structured_report.jpg)
+*Received mock SR AI result in Orthanc Viewer* 
