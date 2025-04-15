@@ -2,6 +2,10 @@
 
 A demo project showcasing DICOM study routing between Orthanc servers, with automatic forwarding to an AI inference server when studies stabilize.
 
+## Terms
+Orthanc Routing Server: The Orthanc server that routes studies to the AI server. Used to serve images to ODELIA viewer.
+Orthanc AI Server: The Orthanc server that performs the AI inference. i.e. processes the images into format suitable for AI models and wraps AI results in DICOM SR/SC format. 
+ODELIA Viewer: The viewer application that allows you to send studies to the AI server and view the results.
 ## Quick Test Guide
 ### 0. Clone and start containers
 ```bash
@@ -31,13 +35,11 @@ Use the Orthanc Explorer web interface at http://localhost:8000/app/explorer.htm
 
 ### 3. Check AI Server Reception
 
-1. Access AI Orthanc: http://localhost:8001/ui/app/index.html#/
+1. Access AI Orthanc instance: http://localhost:8001/ui/app/index.html#/
 ![AI Server Studies](screenshots/ai-server-studies.png)  
 *Received studies in AI Orthanc*
 
-2. Check processing status in the AI.
-![Send to AI Panel](screenshots/send_to_ai_panel.jpg)
-*AI processing panel in Orthanc Viewer*
+---
 
 ### Viewer Panel Integration
 
