@@ -35,19 +35,36 @@ Use the Orthanc Explorer web interface at http://localhost:8000/app/explorer.htm
 ![AI Server Studies](screenshots/ai-server-studies.png)  
 *Received studies in AI Orthanc*
 
-2. Check processing status in the AI server interface.
+2. Check processing status in the AI.
+![Send to AI Panel](screenshots/send_to_ai_panel.jpg)
+*AI processing panel in Orthanc Viewer*
+
+### Viewer Panel Integration
+
+The ODELIA viewer includes a dedicated panel for AI integration that allows you to:
+1. Send studies for AI processing
+2. View AI results directly in the viewer interface
+
+![Send to AI Panel](screenshots/send_to_ai_panel.jpg)
+*AI processing panel in ODELIA Viewer*
+
+![AI Result Viewer](screenshots/with_ai_result_viewer.jpg)
+*Viewing AI results in ODELIA Viewer*
 
 ### 4. Check acquired AI results
 
 1. Two new processed studies
 ![With AI results](screenshots/with_ai_results.jpg)
-*Received mock AI results in Orthanc Viewer* 
+*Received mock AI results in ODELIA Viewer* 
 
 2. Edited image sequence
 ![image sequence](screenshots/mock_ai_processed.jpg)
 *Received mock visual AI result in Orthanc Viewer* 
 
-
 3. Structure report generated
 ![SR sequence](screenshots/structured_report.jpg)
 *Received mock SR AI result in Orthanc Viewer* 
+
+4. View AI results in viewer
+![AI Result Viewer](screenshots/with_ai_result_viewer.jpg)
+*Viewing AI results in ODELIA Viewer*
