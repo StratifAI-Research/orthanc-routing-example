@@ -1,7 +1,7 @@
 {
     "DicomWeb" : {
         "Servers" : {
-            "ai" : [ "http://orthanc-ai:8042/dicom-web/" ]
+     //       "ai" : [ "http://orthanc-ai:8042/dicom-web/" ]
         }
         },
     
@@ -516,7 +516,7 @@
 
   // Whether to store the Orthanc peers in the Orthanc database
   // instead of in this configuration file (new in Orthanc 1.5.0)
-  "OrthancPeersInDatabase" : false,
+  "OrthancPeersInDatabase" : true,
 
   // Parameters of the HTTP proxy to be used by Orthanc. If set to the
   // empty string, no HTTP proxy is used. For instance:
