@@ -211,14 +211,9 @@ def SendToAiDicomWeb(output, uri, **request):
             output.SendHttpStatus(400, 'Study already contains AI results')
             return
 
-        # Parse the target URL
-        url_parts = target_url.split('/')
-        host_port = url_parts[0].split(':')
-        host = host_port[0]
-        port = int(host_port[1]) if len(host_port) > 1 else 8042
         
         # Use standard DICOMweb endpoint for STOW-RS
-        dicomweb_url = f"http://{host}:{port}/dicom-web/studies"
+        dicomweb_url = f"{target_url}/dicom-web/studies"
         
         try:
             # Get all instances from the study

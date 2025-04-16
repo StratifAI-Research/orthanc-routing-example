@@ -5,7 +5,7 @@ ORTHANC_URL="http://localhost:8000"
 DICOM_FILE="./sample_data/blue-circle.dcm"
 TARGET_SERVER="ai"
 TARGET_URL="orthanc-ai:4242/ORTHANC"
-DICOMWEB_URL="orthanc-ai:8042"
+DICOMWEB_URL="http://orthanc-ai:8042"
 
 # Default verbosity is off
 VERBOSE=false
