@@ -5,7 +5,7 @@ ORTHANC_URL="http://localhost:8000"
 DICOM_FILE="./sample_data/blue-circle.dcm"
 TARGET_SERVER="ai"
 TARGET_URL="orthanc-ai:4242/ORTHANC"
-DICOMWEB_URL="http://orthanc-ai:8042"
+DICOMWEB_URL="http://orthanc-ai:8042/dicom-web"
 
 # Default verbosity is off
 VERBOSE=false
@@ -44,13 +44,6 @@ fi
 
 echo "Study ID: $STUDY_ID"
 
-# Test DICOM endpoint
-echo "Testing send-to-ai-dicom endpoint..."
-curl $CURL_VERBOSE -X POST "${ORTHANC_URL}/send-to-ai-dicom" \
-    -H "Content-Type: application/json" \
-    -d "{\"study_id\":\"$STUDY_ID\",\"target\":\"$TARGET_SERVER\",\"target_url\":\"$TARGET_URL\"}"
-
-# Test DICOMWeb endpoint
 echo "Testing send-to-ai-dicomweb endpoint..."
 curl $CURL_VERBOSE -X POST "${ORTHANC_URL}/send-to-ai-dicomweb" \
     -H "Content-Type: application/json" \
@@ -62,4 +55,12 @@ curl $CURL_VERBOSE -X POST "${ORTHANC_URL}/send-to-ai" \
     -H "Content-Type: application/json" \
     -d "{\"study_id\":\"$STUDY_ID\",\"target\":\"$TARGET_SERVER\",\"target_url\":\"$DICOMWEB_URL\"}"
 
+
+# Test DICOM endpoint
+echo "Testing send-to-ai-dicom endpoint..."
+curl $CURL_VERBOSE -X POST "${ORTHANC_URL}/send-to-ai-dicom" \
+    -H "Content-Type: application/json" \
+    -d "{\"study_id\":\"$STUDY_ID\",\"target\":\"$TARGET_SERVER\",\"target_url\":\"$TARGET_URL\"}"
+
+# Test DICOMWeb endpoint
 echo "Test completed" 

@@ -197,71 +197,126 @@ def SendToAiDicomWeb(output, uri, **request):
         return
     
     try:
+        print("SendToAiDicomWeb: Starting processing of request")
+        
         # Parse the POST body
         body = json.loads(request['body'])
         study_id = body.get('study_id')
         target = body.get('target')
         target_url = body.get('target_url')
         
+        print(f"SendToAiDicomWeb: Request parameters - study_id: {study_id}, target: {target}, target_url: {target_url}")
+        
         if not study_id or not target:
+            print("SendToAiDicomWeb: Missing required parameters")
             output.SendHttpStatus(400, 'Missing study_id or target in request body')
             return
             
+        if not target_url:
+            print("SendToAiDicomWeb: Missing target_url parameter")
+            output.SendHttpStatus(400, 'Missing target_url in request body')
+            return
+        
+        # Verify study_id exists in Orthanc
+        try:
+            study_info = json.loads(orthanc.RestApiGet(f"/studies/{study_id}"))
+            print(f"SendToAiDicomWeb: Valid study found with ID {study_id}")
+            print(f"SendToAiDicomWeb: Study contains {len(study_info['Series'])} series and {study_info['PatientMainDicomTags'].get('PatientName', 'Unknown')} patient")
+        except Exception as e:
+            print(f"SendToAiDicomWeb: Error verifying study existence: {str(e)}")
+            output.SendHttpStatus(404, f"Study with ID {study_id} not found: {str(e)}")
+            return
+            
         if IsAiProcessed(study_id):
+            print("SendToAiDicomWeb: Study already contains AI results")
             output.SendHttpStatus(400, 'Study already contains AI results')
             return
-
-        
-        # Use standard DICOMweb endpoint for STOW-RS
-        dicomweb_url = f"{target_url}/dicom-web/studies"
         
         try:
-            # Get all instances from the study
-            instances = json.loads(orthanc.RestApiGet(f"/studies/{study_id}/instances"))
+            # Configure the DICOMweb server
+            print(f"SendToAiDicomWeb: Configuring DICOMweb server {target} with URL {target_url}")
             
-            # Prepare multipart form data
-            files = []
-            for instance in instances:
-                # Get the DICOM data for each instance
-                dicom_data = orthanc.RestApiGet(f"/instances/{instance['ID']}/file")
-                files.append(('file', ('instance.dcm', dicom_data, 'application/dicom')))
-            
-            # Set proper DICOMweb headers
-            headers = {
-                "Accept": "application/dicom+json"
+            # Create server configuration
+            server_config = {
+                "Url": target_url,
+                "Username": body.get('username', ''),
+                "Password": body.get('password', ''),
+                "HttpHeaders": {}
             }
             
-            # Send the study using multipart form data
-            response = requests.post(
-                dicomweb_url,
-                files=files,
-                headers=headers,
-                timeout=30
+            # Configure the server using direct HTTP request
+            config_response = requests.put(
+                f"http://localhost:8042/dicom-web/servers/{target}",
+                json=server_config
             )
             
-            if response.status_code in [200, 201, 202]:  # DICOMweb standard success codes
-                response_data = {
-                    "status": "success",
-                    "message": f"Successfully sent study {study_id} to {target} using DICOMweb protocol",
-                    "study_id": study_id,
-                    "target": target
-                }
-                output.AnswerBuffer(json.dumps(response_data), 'application/json')
+            if config_response.status_code not in [200, 201, 204]:
+                error_message = f"Error configuring DICOMweb server: {config_response.text}"
+                print(f"SendToAiDicomWeb: {error_message}")
+                output.SendHttpStatus(500, error_message)
+                return
+            
+            print(f"SendToAiDicomWeb: Successfully configured DICOMweb server: {target}")
+            
+            # Get all instances from the study
+            instances = json.loads(orthanc.RestApiGet(f"/studies/{study_id}/instances"))
+            print(f"SendToAiDicomWeb: Found {len(instances)} instances in study")
+            
+            # Prepare the STOW-RS request body
+            stow_body = {
+                "Resources": [instance['ID'] for instance in instances]
+            }
+            print(f"SendToAiDicomWeb: Prepared STOW-RS request with {len(stow_body['Resources'])} instances")
+            
+            # Send the request using direct HTTP request
+            stow_response = requests.post(
+                f"http://localhost:8042/dicom-web/servers/{target}/stow",
+                json=stow_body
+            )
+            
+            print(f"SendToAiDicomWeb: STOW-RS response status: {stow_response.status_code}")
+            print(f"SendToAiDicomWeb: STOW-RS response: {stow_response.text}")
+            
+            # Process response
+            if stow_response.status_code in [200, 201, 202]:
+                try:
+                    response_data = stow_response.json()
+                    print("SendToAiDicomWeb: Successfully sent study via DICOMweb")
+                    
+                    # Return success response
+                    success_response = {
+                        "status": "success",
+                        "message": f"Successfully sent study {study_id} to {target} using DICOMweb protocol",
+                        "study_id": study_id,
+                        "target": target,
+                        "response": response_data
+                    }
+                    print("SendToAiDicomWeb: Returning success response")
+                    output.AnswerBuffer(json.dumps(success_response), 'application/json')
+                except Exception as e:
+                    error_message = f"Error processing STOW-RS response: {str(e)}"
+                    print(f"SendToAiDicomWeb: {error_message}")
+                    output.SendHttpStatus(500, error_message)
             else:
-                error_message = f"DICOMweb error: {response.status_code} - {response.text}"
-                output.SendHttpStatus(response.status_code, error_message)
+                error_message = f"DICOMweb error: {stow_response.status_code} - {stow_response.text}"
+                print(f"SendToAiDicomWeb: {error_message}")
+                output.SendHttpStatus(stow_response.status_code, error_message)
                 
         except Exception as e:
-            error_message = f"Failed to send study using DICOMweb protocol: {str(e)}"
+            error_message = f"Error during STOW-RS request: {str(e)}"
+            print(f"SendToAiDicomWeb: {error_message}")
             output.SendHttpStatus(500, error_message)
             
     except Exception as e:
-        output.SendHttpStatus(500, f"Error processing request: {str(e)}")
+        error_message = f"Error processing request: {str(e)}"
+        print(f"SendToAiDicomWeb: {error_message}")
+        output.SendHttpStatus(500, error_message)
 
 
 def SendToAi(output, uri, **request):
     """REST endpoint to send a study to target server using DICOMWeb protocol"""
     # This is now just a wrapper around SendToAiDicomWeb for backward compatibility
+    print("giving control to SendToAiDicomWeb")
     SendToAiDicomWeb(output, uri, **request)
 
 

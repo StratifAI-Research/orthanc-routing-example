@@ -1,7 +1,7 @@
 {
     "DicomWeb" : {
         "Servers" : {
-     //       "ai" : [ "http://orthanc-ai:8042/dicom-web/" ]
+            "ai" : [ "http://orthanc-ai:8042/dicom-web/" ]
         }
         },
     
