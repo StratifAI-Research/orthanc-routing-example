@@ -1,14 +1,12 @@
 #!/bin/bash
 
 # Configuration
-VIEWER_URL="http://localhost:8000"  # Using port 8000 for orthanc-viewer
 ROUTER_URL="http://localhost:8003"  # Using port 8003 for orthanc-ai-router
-AI_URL="http://localhost:5555"      # Direct AI service URL
-DICOM_DIR="./sample_data/mri"       # Directory containing DICOM files
+VIEWER_URL="http://localhost:8000"  # Using port 8000 for orthanc-viewer
+DICOM_DIR="./sample_data/mri"  # Directory containing DICOM files
 VERBOSE=false
-MAX_RETRIES=30                      # Maximum number of retries
-RETRY_INTERVAL=10                   # Seconds between retries
-USE_DIRECT_AI=false                 # Whether to use direct AI endpoint
+MAX_RETRIES=30  # Maximum number of retries
+RETRY_INTERVAL=10  # Seconds between retries
 
 # Parse command line arguments
 while [[ $# -gt 0 ]]; do
@@ -21,13 +19,9 @@ while [[ $# -gt 0 ]]; do
       DICOM_DIR="$2"
       shift 2
       ;;
-    --direct-ai)
-      USE_DIRECT_AI=true
-      shift
-      ;;
     *)
       echo "Unknown option: $1"
-      echo "Usage: $0 [-v|--verbose] [-d|--directory <directory>] [--direct-ai]"
+      echo "Usage: $0 [-v|--verbose] [-d|--directory <directory>]"
       exit 1
       ;;
   esac
@@ -55,10 +49,10 @@ fi
 
 echo "Found ${#DICOM_FILES[@]} DICOM files in $DICOM_DIR"
 
-# Upload first DICOM file to Orthanc Viewer to create the study
-echo "Uploading first DICOM file to Orthanc Viewer to create study..."
+# Upload first DICOM file to Orthanc to create the study
+echo "Uploading first DICOM file to create study..."
 FIRST_FILE="${DICOM_FILES[0]}"
-UPLOAD_RESPONSE=$(curl $CURL_VERBOSE -s -X POST "${VIEWER_URL}/instances" --data-binary "@${FIRST_FILE}")
+UPLOAD_RESPONSE=$(curl $CURL_VERBOSE -s -X POST "${ROUTER_URL}/instances" --data-binary "@${FIRST_FILE}")
 STUDY_ID=$(echo "$UPLOAD_RESPONSE" | jq -r '.ParentStudy')
 
 if [ -z "$STUDY_ID" ] || [ "$STUDY_ID" = "null" ]; then
@@ -72,44 +66,8 @@ echo "Study ID: $STUDY_ID"
 # Upload remaining DICOM files to the same study
 for ((i=1; i<${#DICOM_FILES[@]}; i++)); do
     echo "Uploading DICOM file ${DICOM_FILES[$i]} to study..."
-    curl $CURL_VERBOSE -s -X POST "${VIEWER_URL}/instances" --data-binary "@${DICOM_FILES[$i]}"
+    curl $CURL_VERBOSE -s -X POST "${ROUTER_URL}/instances" --data-binary "@${DICOM_FILES[$i]}"
 done
-
-echo "Successfully uploaded all ${#DICOM_FILES[@]} DICOM files to Orthanc Viewer"
-
-# Get the StudyInstanceUID for the study
-STUDY_DETAILS=$(curl $CURL_VERBOSE -s -X GET "${VIEWER_URL}/studies/${STUDY_ID}")
-STUDY_INSTANCE_UID=$(echo "$STUDY_DETAILS" | jq -r '.MainDicomTags.StudyInstanceUID')
-echo "StudyInstanceUID: $STUDY_INSTANCE_UID"
-
-if [ "$USE_DIRECT_AI" = true ]; then
-    # Send study directly to AI for analysis
-    echo "Sending study directly to AI for analysis..."
-    AI_RESPONSE=$(curl $CURL_VERBOSE -s -X POST "${AI_URL}/analyze/mri" \
-        -H "Content-Type: application/json" \
-        -d "{\"study_id\":\"$STUDY_ID\"}")
-
-    if [ $? -ne 0 ]; then
-        echo "Error: Failed to send study directly to AI"
-        exit 1
-    fi
-
-    echo "AI Response: $AI_RESPONSE"
-else
-    # Use the router's send-to-ai-dicomweb endpoint
-    echo "Using router's send-to-ai-dicomweb endpoint..."
-    ROUTER_RESPONSE=$(curl $CURL_VERBOSE -s -X POST "${ROUTER_URL}/send-to-ai-dicomweb" \
-        -H "Content-Type: application/json" \
-        -d "{\"study_id\":\"$STUDY_ID\",\"target\":\"ai\",\"target_url\":\"http://breast-cancer-classification:5555/analyze/mri\"}")
-
-    if [ $? -ne 0 ]; then
-        echo "Error: Failed to send study via router"
-        echo "Response: $ROUTER_RESPONSE"
-        exit 1
-    fi
-
-    echo "Router Response: $ROUTER_RESPONSE"
-fi
 
 # Wait for the study to be processed by the AI model with retries
 echo "Waiting for the study to be processed by the AI model (this may take a while)..."

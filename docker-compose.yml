@@ -74,6 +74,41 @@ services:
     networks:
       - orthanc_net
 
+  orthanc-ai-router:
+    build: orthanc-ai-router
+    ports: ["8003:8042","2003:4242"]
+    container_name: orthanc-ai-router
+    hostname: orthanc-ai-router
+
+    volumes:
+        - ./orthanc-ai-router/orthanc.json:/etc/orthanc/orthanc.json
+        - ./orthanc-ai-router/server.py:/python/server.py
+    environment:
+      ORTHANC__NAME: "orthanc-ai-router"
+      VERBOSE_ENABLED: "true"
+      VERBOSE_STARTUP: "true"
+      ORTHANC__PYTHON_SCRIPT: "/python/server.py"
+      ORTHANC__PYTHON_VERBOSE: "true"
+      MODEL_BACKEND_URL: "http://breast-cancer-classification:5555"
+      AI_TEXT: "PROCESSED BY AI MODEL"
+      AI_COLOR: "blue"
+      AI_NAME: "Breast Cancer Classification Model"
+    networks:
+      - orthanc_net
+    depends_on:
+      - breast-cancer-classification
+
+  breast-cancer-classification:
+    build: MLIntegration/breast-cancer-classification
+    container_name: breast-cancer-classification
+    hostname: breast-cancer-classification
+    environment:
+      ORTHANC_URL: "http://orthanc-ai-router:8042"
+      IMAGE_FOLDER: "./images"
+      MODEL_PATH: "./models/resnet18_abrv_b=32_split0-0.pth"
+    networks:
+      - orthanc_net
+
 networks:
   orthanc_net:
     driver: bridge
