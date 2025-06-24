@@ -12,7 +12,7 @@ def IsAiProcessed(study_id):
             tags = json.loads(
                 orthanc.RestApiGet(f"/instances/{instance['ID']}/tags?simplify")
             )
-            if tags.get("SeriesDescription") == "AI_Processed":
+            if tags.get("SeriesDescription") == "Automated Diagnostic Findings":
                 return True
         return False
     except Exception as e:
@@ -56,18 +56,18 @@ def SendToAiDicom(output, uri, **request):
     if request['method'] != 'POST':
         output.SendMethodNotAllowed('POST')
         return
-    
+
     try:
         # Parse the POST body
         body = json.loads(request['body'])
         study_id = body.get('study_id')
         target = body.get('target')
         target_url = body.get('target_url')
-        
+
         if not study_id or not target:
             output.SendHttpStatus(400, 'Missing study_id or target in request body')
             return
-            
+
         if IsAiProcessed(study_id):
             output.SendHttpStatus(400, 'Study already contains AI results')
             return
@@ -81,19 +81,19 @@ def SendToAiDicom(output, uri, **request):
                 # Parse the target URL to extract host, port, and AE Title
                 # Expected format: host:port/AET
                 print(f"Parsing target URL: {target_url}")
-                
+
                 # First, check if the modality already exists
                 try:
                     existing_modality = json.loads(orthanc.RestApiGet(f"/modalities/{target}"))
                     print(f"Modality {target} already exists with configuration: {existing_modality}")
-                    
+
                     # Delete the existing modality to ensure a clean configuration
                     orthanc.RestApiDelete(f"/modalities/{target}")
                     print(f"Deleted existing modality {target}")
                 except:
                     # Modality doesn't exist, which is fine
                     pass
-                
+
                 # Parse the URL parts
                 url_parts = target_url.split('/')
                 if len(url_parts) >= 2:
@@ -101,9 +101,9 @@ def SendToAiDicom(output, uri, **request):
                     host = host_port[0]
                     port = int(host_port[1]) if len(host_port) > 1 else 104  # Default DICOM port
                     aet = url_parts[1] if len(url_parts) > 1 else target  # Use target name as AE Title if not specified
-                    
+
                     print(f"Extracted host: {host}, port: {port}, AET: {aet}")
-                    
+
                     # Configure the DICOM modality with more detailed settings
                     modality_config = {
                         "AET": aet,
@@ -141,11 +141,11 @@ def SendToAiDicom(output, uri, **request):
                             "1.2.840.10008.1.2.2"   # Explicit VR Big Endian
                         ]
                     }
-                    
+
                     # Add the modality configuration
                     orthanc.RestApiPut(f'/modalities/{target}', json.dumps(modality_config))
                     print(f"Successfully configured DICOM modality: {target}")
-                    
+
                     # Verify the configuration
                     try:
                         configured_modality = json.loads(orthanc.RestApiGet(f"/modalities/{target}"))
@@ -157,14 +157,14 @@ def SendToAiDicom(output, uri, **request):
             except Exception as e:
                 print(f"Warning: Failed to configure DICOM modality: {str(e)}")
                 # Continue anyway as the modality might already be configured
-        
+
         # Try to send the study using DICOM modality
         try:
             # Use the Orthanc study ID directly - this is what the API expects
             print(f"Attempting to send study {study_id} to DICOM modality {target}")
             orthanc.RestApiPost(f'/modalities/{target}/store', json.dumps([study_id]))
             print(f"Successfully sent study {study_id} to DICOM modality {target}")
-            
+
             response_data = {
                 "status": "success",
                 "message": f"Successfully sent study {study_id} to {target} using DICOM protocol",
@@ -180,7 +180,7 @@ def SendToAiDicom(output, uri, **request):
                 "message": error_message
             }
             output.AnswerBuffer(json.dumps(error_response), 'application/json')
-        
+
     except Exception as e:
         error_message = str(e)
         error_response = {
@@ -195,28 +195,28 @@ def SendToAiDicomWeb(output, uri, **request):
     if request['method'] != 'POST':
         output.SendMethodNotAllowed('POST')
         return
-    
+
     try:
         print("SendToAiDicomWeb: Starting processing of request")
-        
+
         # Parse the POST body
         body = json.loads(request['body'])
         study_id = body.get('study_id')
         target = body.get('target')
         target_url = body.get('target_url')
-        
+
         print(f"SendToAiDicomWeb: Request parameters - study_id: {study_id}, target: {target}, target_url: {target_url}")
-        
+
         if not study_id or not target:
             print("SendToAiDicomWeb: Missing required parameters")
             output.SendHttpStatus(400, 'Missing study_id or target in request body')
             return
-            
+
         if not target_url:
             print("SendToAiDicomWeb: Missing target_url parameter")
             output.SendHttpStatus(400, 'Missing target_url in request body')
             return
-        
+
         # Verify study_id exists in Orthanc
         try:
             study_info = json.loads(orthanc.RestApiGet(f"/studies/{study_id}"))
@@ -226,16 +226,16 @@ def SendToAiDicomWeb(output, uri, **request):
             print(f"SendToAiDicomWeb: Error verifying study existence: {str(e)}")
             output.SendHttpStatus(404, f"Study with ID {study_id} not found: {str(e)}")
             return
-            
+
         if IsAiProcessed(study_id):
             print("SendToAiDicomWeb: Study already contains AI results")
             output.SendHttpStatus(400, 'Study already contains AI results')
             return
-        
+
         try:
             # Configure the DICOMweb server
             print(f"SendToAiDicomWeb: Configuring DICOMweb server {target} with URL {target_url}")
-            
+
             # Create server configuration
             server_config = {
                 "Url": target_url,
@@ -243,46 +243,46 @@ def SendToAiDicomWeb(output, uri, **request):
                 "Password": body.get('password', ''),
                 "HttpHeaders": {}
             }
-            
+
             # Configure the server using direct HTTP request
             config_response = requests.put(
                 f"http://localhost:8042/dicom-web/servers/{target}",
                 json=server_config
             )
-            
+
             if config_response.status_code not in [200, 201, 204]:
                 error_message = f"Error configuring DICOMweb server: {config_response.text}"
                 print(f"SendToAiDicomWeb: {error_message}")
                 output.SendHttpStatus(500, error_message)
                 return
-            
+
             print(f"SendToAiDicomWeb: Successfully configured DICOMweb server: {target}")
-            
+
             # Get all instances from the study
             instances = json.loads(orthanc.RestApiGet(f"/studies/{study_id}/instances"))
             print(f"SendToAiDicomWeb: Found {len(instances)} instances in study")
-            
+
             # Prepare the STOW-RS request body
             stow_body = {
                 "Resources": [instance['ID'] for instance in instances]
             }
             print(f"SendToAiDicomWeb: Prepared STOW-RS request with {len(stow_body['Resources'])} instances")
-            
+
             # Send the request using direct HTTP request
             stow_response = requests.post(
                 f"http://localhost:8042/dicom-web/servers/{target}/stow",
                 json=stow_body
             )
-            
+
             print(f"SendToAiDicomWeb: STOW-RS response status: {stow_response.status_code}")
             print(f"SendToAiDicomWeb: STOW-RS response: {stow_response.text}")
-            
+
             # Process response
             if stow_response.status_code in [200, 201, 202]:
                 try:
                     response_data = stow_response.json()
                     print("SendToAiDicomWeb: Successfully sent study via DICOMweb")
-                    
+
                     # Return success response
                     success_response = {
                         "status": "success",
@@ -301,12 +301,12 @@ def SendToAiDicomWeb(output, uri, **request):
                 error_message = f"DICOMweb error: {stow_response.status_code} - {stow_response.text}"
                 print(f"SendToAiDicomWeb: {error_message}")
                 output.SendHttpStatus(stow_response.status_code, error_message)
-                
+
         except Exception as e:
             error_message = f"Error during STOW-RS request: {str(e)}"
             print(f"SendToAiDicomWeb: {error_message}")
             output.SendHttpStatus(500, error_message)
-            
+
     except Exception as e:
         error_message = f"Error processing request: {str(e)}"
         print(f"SendToAiDicomWeb: {error_message}")
