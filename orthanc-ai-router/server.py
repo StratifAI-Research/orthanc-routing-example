@@ -79,8 +79,8 @@ def add_text_overlay(pixel_array, text="PROCESSED BY AI", color="red"):
         draw.text(position, text, fill=color, font=font)
         return np.array(im)
 
-def create_mock_ai_dicom(original_dicom, text="PROCESSED BY AI", color="red"):
-    """Creates mock AI DICOM dataset in memory"""
+def create_mock_ai_dicom(original_dicom, text="PROCESSED BY AI", color="red", creation_date=None, creation_time=None, model_results=None, sr_sop_instance_uid=None):
+    """Creates mock AI DICOM dataset in memory with model metadata"""
     ds = Dataset()
     meta = FileMetaDataset()
     meta.TransferSyntaxUID = ExplicitVRLittleEndian
@@ -106,6 +106,23 @@ def create_mock_ai_dicom(original_dicom, text="PROCESSED BY AI", color="red"):
     ds.SOPClassUID = SecondaryCaptureImageStorage
     ds.SOPInstanceUID = generate_uid()
 
+    # AI-specific descriptions
+    ds.StudyDescription = "AI Heatmap Visualization"
+    ds.SeriesDescription = f"{AI_NAME} - Heatmap"
+
+    # Add AI model metadata to match SR content
+    ds.SoftwareVersions = "ResNet-50 v1.2.3"
+    ds.ManufacturerModelName = AI_NAME
+    ds.DeviceSerialNumber = "AI-MODEL-001"
+
+    # Use provided timestamps for SR-SC matching, or generate new ones
+    if creation_date and creation_time:
+        ds.InstanceCreationDate = creation_date
+        ds.InstanceCreationTime = creation_time
+    else:
+        ds.InstanceCreationDate = datetime.now().strftime('%Y%m%d')
+        ds.InstanceCreationTime = datetime.now().strftime('%H%M%S.%f')[:-3]
+
     # Process pixel data
     pixel_array = original_dicom.pixel_array
     processed_pixel_array = add_text_overlay(pixel_array, text, color)
@@ -127,6 +144,23 @@ def create_mock_ai_dicom(original_dicom, text="PROCESSED BY AI", color="red"):
     ds.PixelRepresentation = 0
     ds.PlanarConfiguration = 0
     ds.PixelData = processed_pixel_array.tobytes()
+
+    # Add reference to original image
+    ref_image_sequence = Sequence()
+    ref_image = Dataset()
+    ref_image.ReferencedSOPClassUID = original_dicom.SOPClassUID
+    ref_image.ReferencedSOPInstanceUID = original_dicom.SOPInstanceUID
+    ref_image_sequence.append(ref_image)
+    ds.ReferencedImageSequence = ref_image_sequence
+
+    # Add reference to corresponding SR if provided
+    if sr_sop_instance_uid:
+        ref_instance_sequence = Sequence()
+        ref_instance = Dataset()
+        ref_instance.ReferencedSOPClassUID = ComprehensiveSRStorage
+        ref_instance.ReferencedSOPInstanceUID = sr_sop_instance_uid
+        ref_instance_sequence.append(ref_instance)
+        ds.ReferencedInstanceSequence = ref_instance_sequence
 
     # Write to in-memory buffer
     buffer = io.BytesIO()
@@ -161,26 +195,30 @@ def create_sr_report(original_ds, model_results):
     file_meta.TransferSyntaxUID = ExplicitVRLittleEndian
 
     ds = FileDataset(None, {}, file_meta=file_meta, preamble=b"\0" * 128)
-    
+
     # Basic patient/study identification (link to original study)
     ds.PatientName = original_ds.PatientName
     ds.PatientID = original_ds.PatientID
     ds.StudyInstanceUID = original_ds.StudyInstanceUID
     ds.SeriesInstanceUID = generate_uid()  # New UID for SR series
     ds.SOPInstanceUID = file_meta.MediaStorageSOPInstanceUID
-    
+
     # SR-specific attributes
     ds.Modality = 'SR'
     ds.SOPClassUID = ComprehensiveSRStorage
     ds.StudyDescription = "AI Classification Report"
     ds.SeriesDescription = "Automated Diagnostic Findings"
-    ds.InstanceCreationDate = datetime.now().strftime('%Y%m%d')
-    ds.InstanceCreationTime = datetime.now().strftime('%H%M%S')
+
+    # Use consistent timestamps for SR-SC matching
+    current_date = datetime.now().strftime('%Y%m%d')
+    current_time = datetime.now().strftime('%H%M%S.%f')[:-3]  # Include milliseconds
+    ds.InstanceCreationDate = current_date
+    ds.InstanceCreationTime = current_time
 
     # Create content sequence for structured reporting
     content_sequence = Sequence()
 
-    # 1. Root container
+    # Root container
     root_container = Dataset()
     root_container.ValueType = 'CONTAINER'
     root_container.ConceptNameCodeSequence = [create_code_sequence(
@@ -192,7 +230,7 @@ def create_sr_report(original_ds, model_results):
 
     # 2. Classification results for both sides
     content_items = []
-    
+
     for side in ["left", "right"]:
         if side in model_results and "error" not in model_results[side]:
             finding_item = Dataset()
@@ -202,7 +240,7 @@ def create_sr_report(original_ds, model_results):
                 coding_scheme='SRT',
                 code_meaning=f'{side.capitalize()} Side Probability'
             )]
-            
+
             # Map "Cancerous" to malignant and "Not Cancerous" to benign
             is_malignant = model_results[side]["prediction"] == "Cancerous"
             finding_item.ConceptCodeSequence = [create_code_sequence(
@@ -210,14 +248,14 @@ def create_sr_report(original_ds, model_results):
                 coding_scheme='SCT',
                 code_meaning='Malignant' if is_malignant else 'Benign'
             )]
-            
+
             finding_item.MeasuredValueSequence = [create_measurement(
                 value=model_results[side]["confidence"],
                 unit='%',
                 code_value='%',
                 coding_scheme='UCUM'
             )]
-            
+
             content_items.append(finding_item)
         else:
             # Add error message if available
@@ -260,7 +298,7 @@ def create_sr_report(original_ds, model_results):
     # Write to in-memory buffer
     buffer = io.BytesIO()
     ds.save_as(buffer)
-    return buffer.getvalue()
+    return buffer.getvalue(), current_date, current_time, ds.SOPInstanceUID
 
 def OnStableStudy(changeType, level, resourceId):
     if changeType == orthanc.ChangeType.STABLE_STUDY:
@@ -279,10 +317,10 @@ def OnStableStudy(changeType, level, resourceId):
             instance_id = instances[0]["ID"]
             dicom_buffer = orthanc.GetDicomForInstance(instance_id)
             original_dicom = dcmread(io.BytesIO(dicom_buffer))
-            
+
             # Get series instance UID
             series_instance_uid = original_dicom.SeriesInstanceUID
-            
+
             # Call the model backend
             try:
                 model_response = requests.post(
@@ -290,17 +328,25 @@ def OnStableStudy(changeType, level, resourceId):
                     json={"seriesInstanceUID": series_instance_uid},
                     timeout=30
                 )
-                
+
                 if model_response.status_code != 200:
                     print(f"Error from model backend: {model_response.status_code} - {model_response.text}")
                     return
-                    
+
                 model_results = model_response.json()
                 print(f"Model results: {model_results}")
 
-                # Generate both SC and SR responses
-                mock_sc_bytes = create_mock_ai_dicom(original_dicom, AI_TEXT, AI_COLOR)
-                mock_sr_bytes = create_sr_report(original_dicom, model_results)
+                # Generate both SC and SR responses with matching timestamps
+                mock_sr_bytes, current_date, current_time, sr_sop_instance_uid = create_sr_report(original_dicom, model_results)
+                mock_sc_bytes = create_mock_ai_dicom(
+                    original_dicom,
+                    AI_TEXT,
+                    AI_COLOR,
+                    current_date,
+                    current_time,
+                    model_results,
+                    sr_sop_instance_uid
+                )
 
                 # Send both files to orthanc-viewer
                 for dicom_bytes, desc in [(mock_sc_bytes, "SC"), (mock_sr_bytes, "SR")]:
@@ -326,4 +372,4 @@ def OnStableStudy(changeType, level, resourceId):
             print(f"Error processing study {resourceId}: {str(e)}")
 
 # Register the callback function
-orthanc.RegisterOnChangeCallback(OnStableStudy) 
+orthanc.RegisterOnChangeCallback(OnStableStudy)
