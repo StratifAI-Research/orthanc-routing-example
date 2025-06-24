@@ -106,14 +106,31 @@ def create_mock_ai_dicom(original_dicom, text="PROCESSED BY AI", color="red", cr
     ds.SOPClassUID = SecondaryCaptureImageStorage
     ds.SOPInstanceUID = generate_uid()
 
-    # AI-specific descriptions
+        # AI-specific descriptions
     ds.StudyDescription = "AI Heatmap Visualization"
     ds.SeriesDescription = f"{AI_NAME} - Heatmap"
 
-    # Add AI model metadata to match SR content
-    ds.SoftwareVersions = "ResNet-50 v1.2.3"
-    ds.ManufacturerModelName = AI_NAME
-    ds.DeviceSerialNumber = "AI-MODEL-001"
+    # Add AI model metadata to EXACTLY match SR content
+    ds.ManufacturerModelName = AI_NAME  # Keep this for basic DICOM compliance
+
+    # Add the SAME structured content as SR for proper grouping
+    # This mimics the SR ContentSequence structure in SC format
+    content_sequence = Sequence()
+
+    # Model metadata item matching SR exactly
+    model_metadata = Dataset()
+    model_metadata.ValueType = 'CODE'
+    model_metadata.ConceptNameCodeSequence = [create_code_sequence(
+        code_value='12710003',  # SAME as SR
+        coding_scheme='SCT',    # SAME as SR
+        code_meaning='AI Model' # SAME as SR
+    )]
+    model_metadata.TextValue = AI_NAME           # SAME as SR
+    model_metadata.AlgorithmName = "ResNet-50"   # SAME as SR
+    model_metadata.AlgorithmVersion = "1.2.3"    # SAME as SR
+
+    content_sequence.append(model_metadata)
+    ds.ContentSequence = content_sequence
 
     # Use provided timestamps for SR-SC matching, or generate new ones
     if creation_date and creation_time:
