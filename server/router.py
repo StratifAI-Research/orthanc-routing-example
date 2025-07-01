@@ -4,20 +4,75 @@ import orthanc
 import requests
 
 
-def IsAiProcessed(study_id):
-    """Check if any instance in study has AI marker"""
+def FilterAIResultSeries(study_id):
+    """
+    Get all non-AI series from a study for AI processing.
+    Returns a list of series IDs that should be sent to AI models.
+    Filters out any series that appear to be AI-generated results.
+    """
     try:
-        instances = json.loads(orthanc.RestApiGet(f"/studies/{study_id}/instances"))
-        for instance in instances:
-            tags = json.loads(
-                orthanc.RestApiGet(f"/instances/{instance['ID']}/tags?simplify")
-            )
-            if tags.get("SeriesDescription") == "Automated Diagnostic Findings":
-                return True
-        return False
+        # Get all series in the study
+        series_list = json.loads(orthanc.RestApiGet(f"/studies/{study_id}/series"))
+
+        original_series = []
+        ai_series_count = 0
+
+        for series in series_list:
+            series_id = series['ID']
+
+            # Get series tags to check if it's an AI result
+            try:
+                series_tags = json.loads(
+                    orthanc.RestApiGet(f"/series/{series_id}/tags?simplify")
+                )
+
+                series_description = series_tags.get("SeriesDescription", "").strip()
+                modality = series_tags.get("Modality", "").strip()
+
+                # Check for AI result markers (based on server.py analysis)
+                ai_markers = [
+                    "Automated Diagnostic Findings",     # Exact SR match from server.py
+                    "- Heatmap",                        # SC pattern match from server.py
+                    "AI Analysis Result",               # Generic fallback
+                    "AI Generated",                     # Generic fallback
+                    "Secondary Capture AI",             # Generic fallback
+                    "AI Structured Report"              # Generic fallback
+                ]
+
+                is_ai_result = (
+                    any(marker in series_description for marker in ai_markers) or
+                    (modality in ["SC", "SR"] and "AI" in series_description.upper()) or
+                    series_description.startswith("AI_") or
+                    series_description.endswith("_AI")
+                )
+
+                if is_ai_result:
+                    ai_series_count += 1
+                    print(f"Filtering out AI result series: {series_id} ({series_description}, {modality})")
+                else:
+                    original_series.append(series_id)
+
+            except Exception as e:
+                print(f"Warning: Could not check series {series_id}: {str(e)}")
+                # If we can't check, assume it's original data and include it
+                original_series.append(series_id)
+
+        print(f"Study {study_id}: Found {len(original_series)} original series, {ai_series_count} AI result series")
+        return original_series
+
     except Exception as e:
-        print(f"Error checking AI marker: {str(e)}")
-        return False
+        print(f"Error filtering AI result series for study {study_id}: {str(e)}")
+        # Return empty list on error to prevent sending anything
+        return []
+
+
+def HasProcessableContent(study_id):
+    """
+    Check if study has any non-AI series that can be processed.
+    Returns True if there are original series available for AI processing.
+    """
+    original_series = FilterAIResultSeries(study_id)
+    return len(original_series) > 0
 
 
 def GetStudyInstanceUID(study_id):
@@ -68,8 +123,9 @@ def SendToAiDicom(output, uri, **request):
             output.SendHttpStatus(400, 'Missing study_id or target in request body')
             return
 
-        if IsAiProcessed(study_id):
-            output.SendHttpStatus(400, 'Study already contains AI results')
+        # Check if study has processable content (non-AI series)
+        if not HasProcessableContent(study_id):
+            output.SendHttpStatus(400, 'Study contains no processable content (only AI results or empty)')
             return
 
         # List all configured modalities before proceeding
@@ -158,12 +214,30 @@ def SendToAiDicom(output, uri, **request):
                 print(f"Warning: Failed to configure DICOM modality: {str(e)}")
                 # Continue anyway as the modality might already be configured
 
-        # Try to send the study using DICOM modality
+        # Get filtered series (excluding AI results) and their instances
+        original_series = FilterAIResultSeries(study_id)
+        if not original_series:
+            output.SendHttpStatus(400, 'No original series found to send (study may contain only AI results)')
+            return
+
+        # Collect all instances from filtered series
+        instance_ids = []
+        for series_id in original_series:
+            try:
+                series_instances = json.loads(orthanc.RestApiGet(f"/series/{series_id}/instances"))
+                series_instance_ids = [instance['ID'] for instance in series_instances]
+                instance_ids.extend(series_instance_ids)
+                print(f"Series {series_id} has {len(series_instance_ids)} instances")
+            except Exception as e:
+                print(f"Warning: Could not get instances for series {series_id}: {str(e)}")
+
+        print(f"Collected {len(instance_ids)} instances from {len(original_series)} original series")
+
+        # Try to send the filtered instances using DICOM modality
         try:
-            # Use the Orthanc study ID directly - this is what the API expects
-            print(f"Attempting to send study {study_id} to DICOM modality {target}")
-            orthanc.RestApiPost(f'/modalities/{target}/store', json.dumps([study_id]))
-            print(f"Successfully sent study {study_id} to DICOM modality {target}")
+            print(f"Attempting to send {len(instance_ids)} instances from study {study_id} to DICOM modality {target}")
+            orthanc.RestApiPost(f'/modalities/{target}/store', json.dumps(instance_ids))
+            print(f"Successfully sent {len(instance_ids)} instances from study {study_id} to DICOM modality {target}")
 
             response_data = {
                 "status": "success",
@@ -227,9 +301,10 @@ def SendToAiDicomWeb(output, uri, **request):
             output.SendHttpStatus(404, f"Study with ID {study_id} not found: {str(e)}")
             return
 
-        if IsAiProcessed(study_id):
-            print("SendToAiDicomWeb: Study already contains AI results")
-            output.SendHttpStatus(400, 'Study already contains AI results')
+        # Check if study has processable content (non-AI series)
+        if not HasProcessableContent(study_id):
+            print("SendToAiDicomWeb: Study contains no processable content (only AI results or empty)")
+            output.SendHttpStatus(400, 'Study contains no processable content (only AI results or empty)')
             return
 
         try:
@@ -258,15 +333,32 @@ def SendToAiDicomWeb(output, uri, **request):
 
             print(f"SendToAiDicomWeb: Successfully configured DICOMweb server: {target}")
 
-            # Get all instances from the study
-            instances = json.loads(orthanc.RestApiGet(f"/studies/{study_id}/instances"))
-            print(f"SendToAiDicomWeb: Found {len(instances)} instances in study")
+            # Get filtered series (excluding AI results) and their instances
+            original_series = FilterAIResultSeries(study_id)
+            if not original_series:
+                error_message = "No original series found to send (study may contain only AI results)"
+                print(f"SendToAiDicomWeb: {error_message}")
+                output.SendHttpStatus(400, error_message)
+                return
 
-            # Prepare the STOW-RS request body
+            # Collect all instances from filtered series
+            instance_ids = []
+            for series_id in original_series:
+                try:
+                    series_instances = json.loads(orthanc.RestApiGet(f"/series/{series_id}/instances"))
+                    series_instance_ids = [instance['ID'] for instance in series_instances]
+                    instance_ids.extend(series_instance_ids)
+                    print(f"SendToAiDicomWeb: Series {series_id} has {len(series_instance_ids)} instances")
+                except Exception as e:
+                    print(f"SendToAiDicomWeb: Warning - Could not get instances for series {series_id}: {str(e)}")
+
+            print(f"SendToAiDicomWeb: Collected {len(instance_ids)} instances from {len(original_series)} original series")
+
+            # Prepare the STOW-RS request body with filtered instances
             stow_body = {
-                "Resources": [instance['ID'] for instance in instances]
+                "Resources": instance_ids
             }
-            print(f"SendToAiDicomWeb: Prepared STOW-RS request with {len(stow_body['Resources'])} instances")
+            print(f"SendToAiDicomWeb: Prepared STOW-RS request with {len(stow_body['Resources'])} instances from original series")
 
             # Send the request using direct HTTP request
             stow_response = requests.post(
