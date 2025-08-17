@@ -2,29 +2,30 @@ import datetime
 import io
 import json
 import os
-import requests
 from datetime import datetime
 
 import numpy as np
 import orthanc
+import requests
 from PIL import Image, ImageDraw, ImageFont
-from pydicom import dcmread
+from pydicom import Dataset, FileDataset, dcmread
 from pydicom.dataset import Dataset, FileMetaDataset
-from pydicom import dcmread, Dataset, FileDataset
 from pydicom.sequence import Sequence
-from pydicom.uid import generate_uid, ExplicitVRLittleEndian
 from pydicom.uid import (
+    ComprehensiveSRStorage,
     ExplicitVRLittleEndian,
     SecondaryCaptureImageStorage,
     generate_uid,
-    ComprehensiveSRStorage
 )
 
 # Configuration
-MODEL_BACKEND_URL = os.environ.get("MODEL_BACKEND_URL", "http://breast-cancer-classification:5555")
+MODEL_BACKEND_URL = os.environ.get(
+    "MODEL_BACKEND_URL", "http://breast-cancer-classification:5555"
+)
 AI_TEXT = os.environ.get("AI_TEXT", "PROCESSED BY AI")
 AI_COLOR = os.environ.get("AI_COLOR", "red")
 AI_NAME = os.environ.get("AI_NAME", "Breast Cancer Classification Model")
+
 
 def add_text_overlay(pixel_array, text="PROCESSED BY AI", color="red"):
     """
@@ -79,7 +80,16 @@ def add_text_overlay(pixel_array, text="PROCESSED BY AI", color="red"):
         draw.text(position, text, fill=color, font=font)
         return np.array(im)
 
-def create_mock_ai_dicom(original_dicom, text="PROCESSED BY AI", color="red", creation_date=None, creation_time=None, model_results=None, sr_sop_instance_uid=None):
+
+def create_mock_ai_dicom(
+    original_dicom,
+    text="PROCESSED BY AI",
+    color="red",
+    creation_date=None,
+    creation_time=None,
+    model_results=None,
+    sr_sop_instance_uid=None,
+):
     """Creates mock AI DICOM dataset in memory with model metadata"""
     ds = Dataset()
     meta = FileMetaDataset()
@@ -106,7 +116,7 @@ def create_mock_ai_dicom(original_dicom, text="PROCESSED BY AI", color="red", cr
     ds.SOPClassUID = SecondaryCaptureImageStorage
     ds.SOPInstanceUID = generate_uid()
 
-        # AI-specific descriptions
+    # AI-specific descriptions
     ds.StudyDescription = "AI Heatmap Visualization"
     ds.SeriesDescription = f"{AI_NAME} - Heatmap"
 
@@ -119,15 +129,17 @@ def create_mock_ai_dicom(original_dicom, text="PROCESSED BY AI", color="red", cr
 
     # Model metadata item matching SR exactly
     model_metadata = Dataset()
-    model_metadata.ValueType = 'CODE'
-    model_metadata.ConceptNameCodeSequence = [create_code_sequence(
-        code_value='12710003',  # SAME as SR
-        coding_scheme='SCT',    # SAME as SR
-        code_meaning='AI Model' # SAME as SR
-    )]
-    model_metadata.TextValue = AI_NAME           # SAME as SR
-    model_metadata.AlgorithmName = "ResNet-50"   # SAME as SR
-    model_metadata.AlgorithmVersion = "1.2.3"    # SAME as SR
+    model_metadata.ValueType = "CODE"
+    model_metadata.ConceptNameCodeSequence = [
+        create_code_sequence(
+            code_value="12710003",  # SAME as SR
+            coding_scheme="SCT",  # SAME as SR
+            code_meaning="AI Model",  # SAME as SR
+        )
+    ]
+    model_metadata.TextValue = AI_NAME  # SAME as SR
+    model_metadata.AlgorithmName = "ResNet-50"  # SAME as SR
+    model_metadata.AlgorithmVersion = "1.2.3"  # SAME as SR
 
     content_sequence.append(model_metadata)
     ds.ContentSequence = content_sequence
@@ -137,8 +149,8 @@ def create_mock_ai_dicom(original_dicom, text="PROCESSED BY AI", color="red", cr
         ds.InstanceCreationDate = creation_date
         ds.InstanceCreationTime = creation_time
     else:
-        ds.InstanceCreationDate = datetime.now().strftime('%Y%m%d')
-        ds.InstanceCreationTime = datetime.now().strftime('%H%M%S.%f')[:-3]
+        ds.InstanceCreationDate = datetime.now().strftime("%Y%m%d")
+        ds.InstanceCreationTime = datetime.now().strftime("%H%M%S.%f")[:-3]
 
     # Process pixel data
     pixel_array = original_dicom.pixel_array
@@ -184,6 +196,7 @@ def create_mock_ai_dicom(original_dicom, text="PROCESSED BY AI", color="red", cr
     ds.save_as(buffer)
     return buffer.getvalue()
 
+
 def create_code_sequence(code_value, coding_scheme, code_meaning):
     """Helper to create coded entries"""
     code_seq = Dataset()
@@ -192,16 +205,18 @@ def create_code_sequence(code_value, coding_scheme, code_meaning):
     code_seq.CodeMeaning = code_meaning
     return code_seq
 
+
 def create_measurement(value, unit, code_value, coding_scheme):
     """Helper for numeric measurements"""
     measurement = Dataset()
     measurement.NumericValue = value
-    measurement.MeasurementUnitsCodeSequence = [create_code_sequence(
-        code_value=code_value,
-        coding_scheme=coding_scheme,
-        code_meaning=unit
-    )]
+    measurement.MeasurementUnitsCodeSequence = [
+        create_code_sequence(
+            code_value=code_value, coding_scheme=coding_scheme, code_meaning=unit
+        )
+    ]
     return measurement
+
 
 def create_sr_report(original_ds, model_results):
     """Create DICOM Structured Report (SR) for model results in memory"""
@@ -221,14 +236,14 @@ def create_sr_report(original_ds, model_results):
     ds.SOPInstanceUID = file_meta.MediaStorageSOPInstanceUID
 
     # SR-specific attributes
-    ds.Modality = 'SR'
+    ds.Modality = "SR"
     ds.SOPClassUID = ComprehensiveSRStorage
     ds.StudyDescription = "AI Classification Report"
     ds.SeriesDescription = "Automated Diagnostic Findings"
 
     # Use consistent timestamps for SR-SC matching
-    current_date = datetime.now().strftime('%Y%m%d')
-    current_time = datetime.now().strftime('%H%M%S.%f')[:-3]  # Include milliseconds
+    current_date = datetime.now().strftime("%Y%m%d")
+    current_time = datetime.now().strftime("%H%M%S.%f")[:-3]  # Include milliseconds
     ds.InstanceCreationDate = current_date
     ds.InstanceCreationTime = current_time
 
@@ -237,13 +252,15 @@ def create_sr_report(original_ds, model_results):
 
     # Root container
     root_container = Dataset()
-    root_container.ValueType = 'CONTAINER'
-    root_container.ConceptNameCodeSequence = [create_code_sequence(
-        code_value='18748-4',  # LOINC code for Diagnostic Imaging Report
-        coding_scheme='LN',
-        code_meaning='Diagnostic Imaging Report'
-    )]
-    root_container.ContinuityOfContent = 'SEPARATE'
+    root_container.ValueType = "CONTAINER"
+    root_container.ConceptNameCodeSequence = [
+        create_code_sequence(
+            code_value="18748-4",  # LOINC code for Diagnostic Imaging Report
+            coding_scheme="LN",
+            code_meaning="Diagnostic Imaging Report",
+        )
+    ]
+    root_container.ContinuityOfContent = "SEPARATE"
 
     # 2. Classification results for both sides
     content_items = []
@@ -251,49 +268,59 @@ def create_sr_report(original_ds, model_results):
     for side in ["left", "right"]:
         if side in model_results and "error" not in model_results[side]:
             finding_item = Dataset()
-            finding_item.ValueType = 'CODE'
-            finding_item.ConceptNameCodeSequence = [create_code_sequence(
-                code_value='R-00339',  # SNOMED CT Observable Entity
-                coding_scheme='SRT',
-                code_meaning=f'{side.capitalize()} Side Probability'
-            )]
+            finding_item.ValueType = "CODE"
+            finding_item.ConceptNameCodeSequence = [
+                create_code_sequence(
+                    code_value="R-00339",  # SNOMED CT Observable Entity
+                    coding_scheme="SRT",
+                    code_meaning=f"{side.capitalize()} Side Probability",
+                )
+            ]
 
             # Map "Cancerous" to malignant and "Not Cancerous" to benign
             is_malignant = model_results[side]["prediction"] == "Cancerous"
-            finding_item.ConceptCodeSequence = [create_code_sequence(
-                code_value='86049000' if is_malignant else '108369006',
-                coding_scheme='SCT',
-                code_meaning='Malignant' if is_malignant else 'Benign'
-            )]
+            finding_item.ConceptCodeSequence = [
+                create_code_sequence(
+                    code_value="86049000" if is_malignant else "108369006",
+                    coding_scheme="SCT",
+                    code_meaning="Malignant" if is_malignant else "Benign",
+                )
+            ]
 
-            finding_item.MeasuredValueSequence = [create_measurement(
-                value=model_results[side]["confidence"],
-                unit='%',
-                code_value='%',
-                coding_scheme='UCUM'
-            )]
+            finding_item.MeasuredValueSequence = [
+                create_measurement(
+                    value=model_results[side]["confidence"],
+                    unit="%",
+                    code_value="%",
+                    coding_scheme="UCUM",
+                )
+            ]
 
             content_items.append(finding_item)
         else:
             # Add error message if available
             error_item = Dataset()
-            error_item.ValueType = 'TEXT'
-            error_item.ConceptNameCodeSequence = [create_code_sequence(
-                code_value='R-00339',
-                coding_scheme='SRT',
-                code_meaning=f'{side.capitalize()} Side Analysis'
-            )]
+            error_item.ValueType = "TEXT"
+            error_item.ConceptNameCodeSequence = [
+                create_code_sequence(
+                    code_value="R-00339",
+                    coding_scheme="SRT",
+                    code_meaning=f"{side.capitalize()} Side Analysis",
+                )
+            ]
             error_item.TextValue = model_results[side].get("error", "Analysis failed")
             content_items.append(error_item)
 
     # 3. AI Model metadata
     model_metadata = Dataset()
-    model_metadata.ValueType = 'CODE'
-    model_metadata.ConceptNameCodeSequence = [create_code_sequence(
-        code_value='12710003',  # SCT code for "Algorithm"
-        coding_scheme='SCT',
-        code_meaning='AI Model'
-    )]
+    model_metadata.ValueType = "CODE"
+    model_metadata.ConceptNameCodeSequence = [
+        create_code_sequence(
+            code_value="12710003",  # SCT code for "Algorithm"
+            coding_scheme="SCT",
+            code_meaning="AI Model",
+        )
+    ]
     model_metadata.TextValue = AI_NAME
     model_metadata.AlgorithmName = "ResNet-50"
     model_metadata.AlgorithmVersion = "1.2.3"
@@ -316,6 +343,7 @@ def create_sr_report(original_ds, model_results):
     buffer = io.BytesIO()
     ds.save_as(buffer)
     return buffer.getvalue(), current_date, current_time, ds.SOPInstanceUID
+
 
 def OnStableStudy(changeType, level, resourceId):
     if changeType == orthanc.ChangeType.STABLE_STUDY:
@@ -343,18 +371,22 @@ def OnStableStudy(changeType, level, resourceId):
                 model_response = requests.post(
                     f"{MODEL_BACKEND_URL}/analyze/mri",
                     json={"seriesInstanceUID": series_instance_uid},
-                    timeout=30
+                    timeout=100,
                 )
 
                 if model_response.status_code != 200:
-                    print(f"Error from model backend: {model_response.status_code} - {model_response.text}")
+                    print(
+                        f"Error from model backend: {model_response.status_code} - {model_response.text}"
+                    )
                     return
 
                 model_results = model_response.json()
                 print(f"Model results: {model_results}")
 
                 # Generate both SC and SR responses with matching timestamps
-                mock_sr_bytes, current_date, current_time, sr_sop_instance_uid = create_sr_report(original_dicom, model_results)
+                mock_sr_bytes, current_date, current_time, sr_sop_instance_uid = (
+                    create_sr_report(original_dicom, model_results)
+                )
                 mock_sc_bytes = create_mock_ai_dicom(
                     original_dicom,
                     AI_TEXT,
@@ -362,7 +394,7 @@ def OnStableStudy(changeType, level, resourceId):
                     current_date,
                     current_time,
                     model_results,
-                    sr_sop_instance_uid
+                    sr_sop_instance_uid,
                 )
 
                 # Send both files to orthanc-viewer
@@ -375,10 +407,16 @@ def OnStableStudy(changeType, level, resourceId):
                     )
 
                     if response.status_code == 200:
-                        print(f"AI {desc} response successfully stored in orthanc-viewer")
+                        print(
+                            f"AI {desc} response successfully stored in orthanc-viewer"
+                        )
                     else:
-                        print(f"Failed to store AI {desc} response in orthanc-viewer: {response.status_code}")
-                        print(f"Response content: {response.text[:200]}")  # Truncated for logs
+                        print(
+                            f"Failed to store AI {desc} response in orthanc-viewer: {response.status_code}"
+                        )
+                        print(
+                            f"Response content: {response.text[:200]}"
+                        )  # Truncated for logs
 
             except requests.exceptions.RequestException as e:
                 print(f"Network error calling model backend: {str(e)}")
@@ -387,6 +425,7 @@ def OnStableStudy(changeType, level, resourceId):
 
         except Exception as e:
             print(f"Error processing study {resourceId}: {str(e)}")
+
 
 # Register the callback function
 orthanc.RegisterOnChangeCallback(OnStableStudy)

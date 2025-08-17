@@ -1,0 +1,6 @@
+[tool.pytest.ini_options]
+testpaths = [
+  "custom/deploy/orthanc-routing-example/tests"
+]
+addopts = "-q"
+
