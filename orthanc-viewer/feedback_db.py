@@ -40,9 +40,11 @@ def _connect() -> sqlite3.Connection:
     # WAL and busy timeout
     if ENABLE_WAL:
         try:
-            cx.execute("PRAGMA journal_mode=WAL;")
-        except Exception:
-            pass
+            mode = cx.execute("PRAGMA journal_mode=WAL;")
+            assert mode.lower() == "wal", f"journal_mode is {mode}"
+            print(mode)
+        except Exception as e:
+            print(e)
     cx.execute(f"PRAGMA busy_timeout={BUSY_TIMEOUT_MS};")
     return cx
 
