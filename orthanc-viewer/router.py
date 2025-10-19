@@ -142,13 +142,14 @@ def SendToAiDicom(output, uri, **request):
         study_id = body.get("study_id")
         target = body.get("target")
         target_url = body.get("target_url")
+        series_uids = body.get("series_uids")  # Optional: filter by specific series
 
         if not study_id or not target:
             output.SendHttpStatus(400, "Missing study_id or target in request body")
             return
 
-        # Check if study has processable content (non-AI series)
-        if not HasProcessableContent(study_id):
+        # If series_uids not provided, check if study has processable content
+        if not series_uids and not HasProcessableContent(study_id):
             output.SendHttpStatus(
                 400, "Study contains no processable content (only AI results or empty)"
             )
@@ -251,12 +252,36 @@ def SendToAiDicom(output, uri, **request):
                 print(f"Warning: Failed to configure DICOM modality: {str(e)}")
                 # Continue anyway as the modality might already be configured
 
-        # Get filtered series (excluding AI results) and their instances
-        original_series = FilterAIResultSeries(study_id)
+        # Get series to send (either by series_uids or filter AI results)
+        if series_uids:
+            # Convert DICOM SeriesInstanceUIDs to Orthanc series IDs
+            print(f"Filtering by {len(series_uids)} specific series UIDs")
+            original_series = []
+            for series_uid in series_uids:
+                try:
+                    lookup_result = json.loads(
+                        orthanc.RestApiPost("/tools/lookup", series_uid)
+                    )
+                    series_result = [r for r in lookup_result if r["Type"] == "Series"]
+                    if series_result:
+                        original_series.append(series_result[0]["ID"])
+                        print(
+                            f"Found series {series_result[0]['ID']} for UID {series_uid}"
+                        )
+                    else:
+                        print(f"Warning: Series UID {series_uid} not found")
+                except Exception as e:
+                    print(
+                        f"Warning: Could not lookup series UID {series_uid}: {str(e)}"
+                    )
+        else:
+            # Use existing filter (exclude AI results)
+            original_series = FilterAIResultSeries(study_id)
+
         if not original_series:
             output.SendHttpStatus(
                 400,
-                "No original series found to send (study may contain only AI results)",
+                "No series found to send",
             )
             return
 
@@ -276,7 +301,7 @@ def SendToAiDicom(output, uri, **request):
                 )
 
         print(
-            f"Collected {len(instance_ids)} instances from {len(original_series)} original series"
+            f"Collected {len(instance_ids)} instances from {len(original_series)} series"
         )
 
         # Try to send the filtered instances using DICOM modality
@@ -325,9 +350,10 @@ def SendToAiDicomWeb(output, uri, **request):
         study_id = body.get("study_id")
         target = body.get("target")
         target_url = body.get("target_url")
+        series_uids = body.get("series_uids")  # Optional: filter by specific series
 
         print(
-            f"SendToAiDicomWeb: Request parameters - study_id: {study_id}, target: {target}, target_url: {target_url}"
+            f"SendToAiDicomWeb: Request parameters - study_id: {study_id}, target: {target}, target_url: {target_url}, series_uids: {len(series_uids) if series_uids else 0}"
         )
 
         if not study_id or not target:
@@ -352,8 +378,8 @@ def SendToAiDicomWeb(output, uri, **request):
             output.SendHttpStatus(404, f"Study with ID {study_id} not found: {str(e)}")
             return
 
-        # Check if study has processable content (non-AI series)
-        if not HasProcessableContent(study_id):
+        # If series_uids not provided, check if study has processable content
+        if not series_uids and not HasProcessableContent(study_id):
             print(
                 "SendToAiDicomWeb: Study contains no processable content (only AI results or empty)"
             )
@@ -393,10 +419,40 @@ def SendToAiDicomWeb(output, uri, **request):
                 f"SendToAiDicomWeb: Successfully configured DICOMweb server: {target}"
             )
 
-            # Get filtered series (excluding AI results) and their instances
-            original_series = FilterAIResultSeries(study_id)
+            # Get series to send (either by series_uids or filter AI results)
+            if series_uids:
+                # Convert DICOM SeriesInstanceUIDs to Orthanc series IDs
+                print(
+                    f"SendToAiDicomWeb: Filtering by {len(series_uids)} specific series UIDs"
+                )
+                original_series = []
+                for series_uid in series_uids:
+                    try:
+                        lookup_result = json.loads(
+                            orthanc.RestApiPost("/tools/lookup", series_uid)
+                        )
+                        series_result = [
+                            r for r in lookup_result if r["Type"] == "Series"
+                        ]
+                        if series_result:
+                            original_series.append(series_result[0]["ID"])
+                            print(
+                                f"SendToAiDicomWeb: Found series {series_result[0]['ID']} for UID {series_uid}"
+                            )
+                        else:
+                            print(
+                                f"SendToAiDicomWeb: Warning - Series UID {series_uid} not found"
+                            )
+                    except Exception as e:
+                        print(
+                            f"SendToAiDicomWeb: Warning - Could not lookup series UID {series_uid}: {str(e)}"
+                        )
+            else:
+                # Use existing filter (exclude AI results)
+                original_series = FilterAIResultSeries(study_id)
+
             if not original_series:
-                error_message = "No original series found to send (study may contain only AI results)"
+                error_message = "No series found to send"
                 print(f"SendToAiDicomWeb: {error_message}")
                 output.SendHttpStatus(400, error_message)
                 return
@@ -421,7 +477,7 @@ def SendToAiDicomWeb(output, uri, **request):
                     )
 
             print(
-                f"SendToAiDicomWeb: Collected {len(instance_ids)} instances from {len(original_series)} original series"
+                f"SendToAiDicomWeb: Collected {len(instance_ids)} instances from {len(original_series)} series"
             )
 
             # Prepare the STOW-RS request body with filtered instances
