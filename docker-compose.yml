@@ -75,14 +75,14 @@ services:
       - orthanc_net
 
   orthanc-ai-router:
-    build: orthanc-ai-router
+    build: orthanc-router
     ports: ["8003:8042","2003:4242"]
     container_name: orthanc-ai-router
     hostname: orthanc-ai-router
 
     volumes:
-        - ./orthanc-ai-router/orthanc.json:/etc/orthanc/orthanc.json
-        - ./orthanc-ai-router/server.py:/python/server.py
+        - ./orthanc-router/orthanc.json:/etc/orthanc/orthanc.json
+        - ./orthanc-router/server.py:/python/server.py
     environment:
       ORTHANC__NAME: "orthanc-ai-router"
       VERBOSE_ENABLED: "true"
@@ -106,6 +106,18 @@ services:
       ORTHANC_URL: "http://orthanc-ai-router:8042"
       IMAGE_FOLDER: "./images"
       MODEL_PATH: "./models/resnet18_abrv_b=32_split0-0.pth"
+    networks:
+      - orthanc_net
+
+  mst-classifier:
+    build: MLIntegration/MST-classification
+    container_name: mst-classifier
+    hostname: mst-classifier
+    environment:
+      ORTHANC_URL: "http://orthanc-ai-router:8042"
+      IMAGE_FOLDER: "./images"
+      MODEL_PATH: "./mst_model"
+      HF_TOKEN: "HF_TOKEN"
     networks:
       - orthanc_net
 

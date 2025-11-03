@@ -81,7 +81,294 @@ def add_text_overlay(pixel_array, text="PROCESSED BY AI", color="red"):
         return np.array(im)
 
 
-def create_mock_ai_dicom(
+def apply_attention_overlay(pixel_array, attention_map, alpha=0.5, colormap='jet'):
+    """
+    Apply attention map overlay to pixel array
+
+    Args:
+        pixel_array: Original DICOM pixel data
+        attention_map: Attention map as numpy array
+        alpha: Blending factor (0-1)
+        colormap: Matplotlib colormap name
+
+    Returns:
+        Blended RGB image as numpy array
+    """
+    import cv2
+    from matplotlib import cm
+
+    # Normalize attention to [0, 1]
+    attention_norm = (attention_map - attention_map.min()) / (attention_map.max() - attention_map.min() + 1e-8)
+
+    # Resize attention to match pixel array dimensions
+    if len(pixel_array.shape) == 2:
+        target_shape = (pixel_array.shape[1], pixel_array.shape[0])
+    else:
+        target_shape = (pixel_array.shape[1], pixel_array.shape[0])
+
+    attention_resized = cv2.resize(attention_norm, target_shape)
+
+    # Apply colormap
+    colormap_fn = cm.get_cmap(colormap)
+    attention_colored = (colormap_fn(attention_resized)[:, :, :3] * 255).astype(np.uint8)
+
+    # Convert grayscale to RGB if needed
+    if len(pixel_array.shape) == 2:
+        # Normalize grayscale image to 0-255
+        pixel_norm = ((pixel_array - pixel_array.min()) / (pixel_array.max() - pixel_array.min() + 1e-8) * 255).astype(np.uint8)
+        pixel_rgb = cv2.cvtColor(pixel_norm, cv2.COLOR_GRAY2RGB)
+    else:
+        pixel_rgb = pixel_array
+
+    # Blend images
+    blended = cv2.addWeighted(pixel_rgb, 1-alpha, attention_colored, alpha, 0)
+
+    return blended
+
+
+def create_multiframe_attention_sc(
+    original_dicom,
+    attention_maps,
+    creation_date=None,
+    creation_time=None,
+    sr_sop_instance_uid=None,
+):
+    """
+    Create multi-frame DICOM Secondary Capture for all attention map visualizations
+
+    Args:
+        original_dicom: Original DICOM dataset
+        attention_maps: List of attention map dicts with 'slice_index' and 'data' keys
+        creation_date: Instance creation date
+        creation_time: Instance creation time
+        sr_sop_instance_uid: Reference to SR document
+
+    Returns:
+        DICOM bytes containing all attention maps as stacked frames
+    """
+    ds = Dataset()
+    meta = FileMetaDataset()
+    meta.TransferSyntaxUID = ExplicitVRLittleEndian
+    ds.file_meta = meta
+
+    # Copy metadata from original
+    for tag in [
+        "PatientName",
+        "PatientID",
+        "PatientBirthDate",
+        "PatientSex",
+        "StudyInstanceUID",
+        "StudyDate",
+        "StudyTime",
+        "StudyID",
+    ]:
+        setattr(ds, tag, getattr(original_dicom, tag, None))
+
+    # Set derived attributes
+    ds.Modality = "SC"
+    ds.SeriesInstanceUID = generate_uid()
+    ds.ConversionType = "DF"
+    ds.SOPClassUID = SecondaryCaptureImageStorage
+    ds.SOPInstanceUID = generate_uid()
+
+    # Multi-frame attention map description
+    ds.StudyDescription = "AI Attention Map Visualization"
+    ds.SeriesDescription = f"{AI_NAME} - Attention Heatmap"
+
+    # Add AI model metadata
+    ds.ManufacturerModelName = AI_NAME
+
+    # Use provided timestamps
+    if creation_date and creation_time:
+        ds.InstanceCreationDate = creation_date
+        ds.InstanceCreationTime = creation_time
+    else:
+        ds.InstanceCreationDate = datetime.now().strftime("%Y%m%d")
+        ds.InstanceCreationTime = datetime.now().strftime("%H%M%S.%f")[:-3]
+
+    # Process all attention maps and stack them as frames
+    frames_pixel_data = []
+    original_pixel_array = original_dicom.pixel_array
+
+    # Get base frame for dimension reference
+    if len(original_pixel_array.shape) == 4:
+        # Multi-frame original DICOM
+        base_frame = original_pixel_array[0]
+    else:
+        # Single frame original DICOM
+        base_frame = original_pixel_array
+
+    # Sort attention maps by slice_index to ensure proper ordering
+    sorted_attention_maps = sorted(attention_maps, key=lambda x: x.get('slice_index', 0))
+
+    for att_map_data in sorted_attention_maps:
+        slice_idx = att_map_data.get('slice_index', 0)
+        attention_array = np.array(att_map_data.get('data'))
+
+        # Get corresponding original frame if multi-frame
+        if len(original_pixel_array.shape) == 4 and slice_idx < len(original_pixel_array):
+            pixel_frame = original_pixel_array[slice_idx]
+        else:
+            pixel_frame = base_frame
+
+        # Apply attention overlay
+        processed_frame = apply_attention_overlay(pixel_frame, attention_array, alpha=0.5)
+        frames_pixel_data.append(processed_frame)
+
+    # Stack all frames into single array
+    stacked_frames = np.stack(frames_pixel_data, axis=0)  # Shape: [num_frames, rows, cols, 3]
+
+    # Set multi-frame attributes
+    num_frames = len(frames_pixel_data)
+    ds.NumberOfFrames = num_frames
+
+    # Set image dimensions (from first frame)
+    ds.Rows, ds.Columns, ds.SamplesPerPixel = stacked_frames.shape[1:]
+
+    # Set pixel data attributes
+    ds.PhotometricInterpretation = "RGB"
+    ds.BitsAllocated = 8
+    ds.BitsStored = 8
+    ds.HighBit = 7
+    ds.PixelRepresentation = 0
+    ds.PlanarConfiguration = 0
+
+    # Convert stacked frames to bytes
+    ds.PixelData = stacked_frames.tobytes()
+
+    # Add reference to original image
+    ref_image_sequence = Sequence()
+    ref_image = Dataset()
+    ref_image.ReferencedSOPClassUID = original_dicom.SOPClassUID
+    ref_image.ReferencedSOPInstanceUID = original_dicom.SOPInstanceUID
+    ref_image_sequence.append(ref_image)
+    ds.ReferencedImageSequence = ref_image_sequence
+
+    # Add reference to SR if provided
+    if sr_sop_instance_uid:
+        ref_instance_sequence = Sequence()
+        ref_instance = Dataset()
+        ref_instance.ReferencedSOPClassUID = ComprehensiveSRStorage
+        ref_instance.ReferencedSOPInstanceUID = sr_sop_instance_uid
+        ref_instance_sequence.append(ref_instance)
+        ds.ReferencedInstanceSequence = ref_instance_sequence
+
+    # Write to buffer
+    buffer = io.BytesIO()
+    ds.save_as(buffer)
+    return buffer.getvalue()
+
+
+def create_attention_map_sc(
+    original_dicom,
+    attention_map,
+    slice_index=0,
+    creation_date=None,
+    creation_time=None,
+    sr_sop_instance_uid=None,
+):
+    """
+    Create DICOM Secondary Capture for attention map visualization (single frame)
+
+    DEPRECATED: Use create_multiframe_attention_sc for better performance and stacking
+
+    Args:
+        original_dicom: Original DICOM dataset
+        attention_map: Attention map as numpy array
+        slice_index: Index of the attention map slice
+        creation_date: Instance creation date
+        creation_time: Instance creation time
+        sr_sop_instance_uid: Reference to SR document
+
+    Returns:
+        DICOM bytes
+    """
+    ds = Dataset()
+    meta = FileMetaDataset()
+    meta.TransferSyntaxUID = ExplicitVRLittleEndian
+    ds.file_meta = meta
+
+    # Copy metadata from original
+    for tag in [
+        "PatientName",
+        "PatientID",
+        "PatientBirthDate",
+        "PatientSex",
+        "StudyInstanceUID",
+        "StudyDate",
+        "StudyTime",
+        "StudyID",
+    ]:
+        setattr(ds, tag, getattr(original_dicom, tag, None))
+
+    # Set derived attributes
+    ds.Modality = "SC"
+    ds.SeriesInstanceUID = generate_uid()
+    ds.ConversionType = "DF"
+    ds.SOPClassUID = SecondaryCaptureImageStorage
+    ds.SOPInstanceUID = generate_uid()
+
+    # Attention-specific descriptions
+    ds.StudyDescription = "AI Attention Map Visualization"
+    ds.SeriesDescription = f"{AI_NAME} - Attention Map {slice_index}"
+
+    # Add AI model metadata
+    ds.ManufacturerModelName = AI_NAME
+
+    # Use provided timestamps
+    if creation_date and creation_time:
+        ds.InstanceCreationDate = creation_date
+        ds.InstanceCreationTime = creation_time
+    else:
+        ds.InstanceCreationDate = datetime.now().strftime("%Y%m%d")
+        ds.InstanceCreationTime = datetime.now().strftime("%H%M%S.%f")[:-3]
+
+    # Apply attention overlay to pixel data
+    pixel_array = original_dicom.pixel_array
+
+    # For multi-frame, use first frame
+    if len(pixel_array.shape) == 4:
+        pixel_array = pixel_array[0]
+
+    # Apply overlay
+    processed_pixel_array = apply_attention_overlay(pixel_array, attention_map, alpha=0.5)
+
+    # Set image dimensions
+    ds.Rows, ds.Columns, ds.SamplesPerPixel = processed_pixel_array.shape
+
+    # Set pixel data attributes
+    ds.PhotometricInterpretation = "RGB"
+    ds.BitsAllocated = 8
+    ds.BitsStored = 8
+    ds.HighBit = 7
+    ds.PixelRepresentation = 0
+    ds.PlanarConfiguration = 0
+    ds.PixelData = processed_pixel_array.tobytes()
+
+    # Add reference to original image
+    ref_image_sequence = Sequence()
+    ref_image = Dataset()
+    ref_image.ReferencedSOPClassUID = original_dicom.SOPClassUID
+    ref_image.ReferencedSOPInstanceUID = original_dicom.SOPInstanceUID
+    ref_image_sequence.append(ref_image)
+    ds.ReferencedImageSequence = ref_image_sequence
+
+    # Add reference to SR if provided
+    if sr_sop_instance_uid:
+        ref_instance_sequence = Sequence()
+        ref_instance = Dataset()
+        ref_instance.ReferencedSOPClassUID = ComprehensiveSRStorage
+        ref_instance.ReferencedSOPInstanceUID = sr_sop_instance_uid
+        ref_instance_sequence.append(ref_instance)
+        ds.ReferencedInstanceSequence = ref_instance_sequence
+
+    # Write to buffer
+    buffer = io.BytesIO()
+    ds.save_as(buffer)
+    return buffer.getvalue()
+
+
+def create_text_overlay_sc(
     original_dicom,
     text="PROCESSED BY AI",
     color="red",
@@ -90,7 +377,7 @@ def create_mock_ai_dicom(
     model_results=None,
     sr_sop_instance_uid=None,
 ):
-    """Creates mock AI DICOM dataset in memory with model metadata"""
+    """Creates DICOM SC with text overlay for bilateral classification results"""
     ds = Dataset()
     meta = FileMetaDataset()
     meta.TransferSyntaxUID = ExplicitVRLittleEndian
@@ -218,8 +505,133 @@ def create_measurement(value, unit, code_value, coding_scheme):
     return measurement
 
 
-def create_sr_report(original_ds, model_results):
-    """Create DICOM Structured Report (SR) for model results in memory"""
+def create_mst_sr(original_ds, model_results):
+    """
+    Create DICOM Structured Report (SR) for MST model results
+
+    DEPRECATED: MST models now use bilateral format. Use create_bilateral_sr instead.
+
+    Args:
+        original_ds: Original DICOM dataset
+        model_results: Dict with 'classification' and 'attention_maps' keys
+
+    Returns:
+        Tuple of (sr_bytes, creation_date, creation_time, sop_instance_uid)
+    """
+    classification = model_results.get("classification", {})
+
+    # File meta info
+    file_meta = Dataset()
+    file_meta.MediaStorageSOPClassUID = ComprehensiveSRStorage
+    file_meta.MediaStorageSOPInstanceUID = generate_uid()
+    file_meta.TransferSyntaxUID = ExplicitVRLittleEndian
+
+    ds = FileDataset(None, {}, file_meta=file_meta, preamble=b"\0" * 128)
+
+    # Basic patient/study identification
+    ds.PatientName = original_ds.PatientName
+    ds.PatientID = original_ds.PatientID
+    ds.StudyInstanceUID = original_ds.StudyInstanceUID
+    ds.SeriesInstanceUID = generate_uid()
+    ds.SOPInstanceUID = file_meta.MediaStorageSOPInstanceUID
+
+    # SR-specific attributes
+    ds.Modality = "SR"
+    ds.SOPClassUID = ComprehensiveSRStorage
+    ds.StudyDescription = "AI Classification Report - MST"
+    ds.SeriesDescription = "MST Attention-Based Classification"
+
+    # Timestamps
+    current_date = datetime.now().strftime("%Y%m%d")
+    current_time = datetime.now().strftime("%H%M%S.%f")[:-3]
+    ds.InstanceCreationDate = current_date
+    ds.InstanceCreationTime = current_time
+
+    # Create content sequence
+    content_sequence = Sequence()
+
+    # Root container
+    root_container = Dataset()
+    root_container.ValueType = "CONTAINER"
+    root_container.ConceptNameCodeSequence = [
+        create_code_sequence(
+            code_value="18748-4",
+            coding_scheme="LN",
+            code_meaning="Diagnostic Imaging Report",
+        )
+    ]
+    root_container.ContinuityOfContent = "SEPARATE"
+
+    content_items = []
+
+    # Classification result
+    if classification:
+        prediction_item = Dataset()
+        prediction_item.ValueType = "CODE"
+        prediction_item.ConceptNameCodeSequence = [
+            create_code_sequence(
+                code_value="R-00339",
+                coding_scheme="SRT",
+                code_meaning="Classification Result",
+            )
+        ]
+
+        is_malignant = classification.get("prediction") == "Malignant"
+        prediction_item.ConceptCodeSequence = [
+            create_code_sequence(
+                code_value="86049000" if is_malignant else "108369006",
+                coding_scheme="SCT",
+                code_meaning="Malignant" if is_malignant else "Benign",
+            )
+        ]
+
+        probability = classification.get("probability", 0)
+        prediction_item.MeasuredValueSequence = [
+            create_measurement(
+                value=probability * 100,
+                unit="%",
+                code_value="%",
+                coding_scheme="UCUM",
+            )
+        ]
+        content_items.append(prediction_item)
+
+    # Model metadata
+    model_metadata = Dataset()
+    model_metadata.ValueType = "CODE"
+    model_metadata.ConceptNameCodeSequence = [
+        create_code_sequence(
+            code_value="12710003",
+            coding_scheme="SCT",
+            code_meaning="AI Model",
+        )
+    ]
+    model_metadata.TextValue = classification.get("model_name", "MST")
+    model_metadata.AlgorithmName = classification.get("architecture", "Vision Transformer")
+    model_metadata.AlgorithmVersion = classification.get("version", "1.0")
+    content_items.append(model_metadata)
+
+    # Assemble structure
+    root_container.ContentSequence = content_items
+    content_sequence.append(root_container)
+    ds.ContentSequence = content_sequence
+
+    # Referenced images
+    ref_image_sequence = Sequence()
+    ref_image = Dataset()
+    ref_image.ReferencedSOPClassUID = original_ds.SOPClassUID
+    ref_image.ReferencedSOPInstanceUID = original_ds.SOPInstanceUID
+    ref_image_sequence.append(ref_image)
+    ds.ReferencedImageSequence = ref_image_sequence
+
+    # Write to buffer
+    buffer = io.BytesIO()
+    ds.save_as(buffer)
+    return buffer.getvalue(), current_date, current_time, ds.SOPInstanceUID
+
+
+def create_bilateral_sr(original_ds, model_results):
+    """Create DICOM Structured Report (SR) for bilateral classification model results in memory"""
     # File meta info
     file_meta = Dataset()
     file_meta.MediaStorageSOPClassUID = ComprehensiveSRStorage
@@ -312,21 +724,30 @@ def create_sr_report(original_ds, model_results):
             content_items.append(error_item)
 
     # 3. AI Model metadata
-    model_metadata = Dataset()
-    model_metadata.ValueType = "CODE"
-    model_metadata.ConceptNameCodeSequence = [
+    model_metadata_item = Dataset()
+    model_metadata_item.ValueType = "CODE"
+    model_metadata_item.ConceptNameCodeSequence = [
         create_code_sequence(
             code_value="12710003",  # SCT code for "Algorithm"
             coding_scheme="SCT",
             code_meaning="AI Model",
         )
     ]
-    model_metadata.TextValue = AI_NAME
-    model_metadata.AlgorithmName = "ResNet-50"
-    model_metadata.AlgorithmVersion = "1.2.3"
+
+    # Use model_metadata from model results if available (MST format)
+    model_meta = model_results.get("model_metadata", {})
+    if model_meta:
+        model_metadata_item.TextValue = model_meta.get("model_name", AI_NAME)
+        model_metadata_item.AlgorithmName = model_meta.get("architecture", "Unknown")
+        model_metadata_item.AlgorithmVersion = model_meta.get("version", "Unknown")
+    else:
+        # Fallback to defaults for basic bilateral models
+        model_metadata_item.TextValue = AI_NAME
+        model_metadata_item.AlgorithmName = "ResNet-50"
+        model_metadata_item.AlgorithmVersion = "1.2.3"
 
     # Assemble the structure
-    content_items.append(model_metadata)
+    content_items.append(model_metadata_item)
     root_container.ContentSequence = content_items
     content_sequence.append(root_container)
     ds.ContentSequence = content_sequence
@@ -343,6 +764,25 @@ def create_sr_report(original_ds, model_results):
     buffer = io.BytesIO()
     ds.save_as(buffer)
     return buffer.getvalue(), current_date, current_time, ds.SOPInstanceUID
+
+
+def detect_response_format(model_results):
+    """
+    Detect the format of AI model response
+
+    Returns:
+        "bilateral" - for basic bilateral models returning {left: {...}, right: {...}}
+        "bilateral_with_heatmap" - for MST-like models returning {left: {...}, right: {...}, attention_maps: [...]}
+    """
+    has_bilateral = "left" in model_results or "right" in model_results
+    has_attention_maps = "attention_maps" in model_results
+
+    if has_bilateral and has_attention_maps:
+        return "bilateral_with_heatmap"
+    elif has_bilateral:
+        return "bilateral"
+    else:
+        raise ValueError(f"Unknown response format. Keys: {list(model_results.keys())}")
 
 
 def OnStableStudy(changeType, level, resourceId):
@@ -381,24 +821,57 @@ def OnStableStudy(changeType, level, resourceId):
                     return
 
                 model_results = model_response.json()
-                print(f"Model results: {model_results}")
 
-                # Generate both SC and SR responses with matching timestamps
-                mock_sr_bytes, current_date, current_time, sr_sop_instance_uid = (
-                    create_sr_report(original_dicom, model_results)
-                )
-                mock_sc_bytes = create_mock_ai_dicom(
-                    original_dicom,
-                    AI_TEXT,
-                    AI_COLOR,
-                    current_date,
-                    current_time,
-                    model_results,
-                    sr_sop_instance_uid,
-                )
+                # Detect response format and process accordingly
+                response_format = detect_response_format(model_results)
+                print(f"Detected response format: {response_format}")
 
-                # Send both files to orthanc-viewer
-                for dicom_bytes, desc in [(mock_sc_bytes, "SC"), (mock_sr_bytes, "SR")]:
+                dicom_objects_to_upload = []
+
+                if response_format == "bilateral":
+                    # Process basic bilateral classification results (no heatmap)
+                    sr_bytes, current_date, current_time, sr_sop_instance_uid = (
+                        create_bilateral_sr(original_dicom, model_results)
+                    )
+                    sc_bytes = create_text_overlay_sc(
+                        original_dicom,
+                        AI_TEXT,
+                        AI_COLOR,
+                        current_date,
+                        current_time,
+                        model_results,
+                        sr_sop_instance_uid,
+                    )
+                    dicom_objects_to_upload = [(sc_bytes, "SC-Text"), (sr_bytes, "SR-Bilateral")]
+
+                elif response_format == "bilateral_with_heatmap":
+                    # Process bilateral classification results with attention maps (MST model)
+                    print(f"Processing bilateral classification with attention maps")
+
+                    sr_bytes, current_date, current_time, sr_sop_instance_uid = (
+                        create_bilateral_sr(original_dicom, model_results)
+                    )
+                    dicom_objects_to_upload.append((sr_bytes, "SR-Bilateral-MST"))
+
+                    # Create single multi-frame SC with all attention maps stacked
+                    attention_maps = model_results.get("attention_maps", [])
+                    print(f"Creating multi-frame SC with {len(attention_maps)} attention map slices")
+
+                    if attention_maps:
+                        sc_bytes = create_multiframe_attention_sc(
+                            original_dicom,
+                            attention_maps,
+                            creation_date=current_date,
+                            creation_time=current_time,
+                            sr_sop_instance_uid=sr_sop_instance_uid,
+                        )
+                        dicom_objects_to_upload.append((sc_bytes, "SC-MultiFrame-Attention"))
+                        print(f"Multi-frame attention SC created with {len(attention_maps)} frames")
+                    else:
+                        print("No attention maps found in model results")
+
+                # Upload all DICOM objects to orthanc-viewer
+                for dicom_bytes, desc in dicom_objects_to_upload:
                     response = requests.post(
                         "http://orthanc-viewer:8042/instances",
                         data=dicom_bytes,
@@ -422,9 +895,13 @@ def OnStableStudy(changeType, level, resourceId):
                 print(f"Network error calling model backend: {str(e)}")
             except Exception as e:
                 print(f"Error processing model results: {str(e)}")
+                import traceback
+                traceback.print_exc()
 
         except Exception as e:
             print(f"Error processing study {resourceId}: {str(e)}")
+            import traceback
+            traceback.print_exc()
 
 
 # Register the callback function
