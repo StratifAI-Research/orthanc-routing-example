@@ -87,7 +87,7 @@ def apply_attention_overlay(pixel_array, attention_map, alpha=0.5, colormap='jet
 
     Args:
         pixel_array: Original DICOM pixel data
-        attention_map: Attention map as numpy array
+        attention_map: Attention map as numpy array (already normalized to [0, 1] from MST model)
         alpha: Blending factor (0-1)
         colormap: Matplotlib colormap name
 
@@ -97,8 +97,9 @@ def apply_attention_overlay(pixel_array, attention_map, alpha=0.5, colormap='jet
     import cv2
     from matplotlib import cm
 
-    # Normalize attention to [0, 1]
-    attention_norm = (attention_map - attention_map.min()) / (attention_map.max() - attention_map.min() + 1e-8)
+    # Attention map is already normalized to [0, 1] from MST model processing
+    # Just ensure it's in valid range in case of any floating point errors
+    attention_norm = np.clip(attention_map, 0.0, 1.0)
 
     # Resize attention to match pixel array dimensions
     if len(pixel_array.shape) == 2:
@@ -134,17 +135,18 @@ def create_multiframe_attention_sc(
     sr_sop_instance_uid=None,
 ):
     """
-    Create multi-frame DICOM Secondary Capture for all attention map visualizations
+    Create multi-frame DICOM Secondary Capture for complete attention heatmap volume
 
     Args:
         original_dicom: Original DICOM dataset
-        attention_maps: List of attention map dicts with 'slice_index' and 'data' keys
+        attention_maps: List of ALL RGB overlay slices with 'slice_index' and 'data' keys
+                       Each 'data' is RGB overlay [H, W, 3] created by tensor_cam2image in MST model
         creation_date: Instance creation date
         creation_time: Instance creation time
         sr_sop_instance_uid: Reference to SR document
 
     Returns:
-        DICOM bytes containing all attention maps as stacked frames
+        DICOM bytes containing complete 3D RGB overlay heatmap as multi-frame SC
     """
     ds = Dataset()
     meta = FileMetaDataset()
@@ -171,9 +173,9 @@ def create_multiframe_attention_sc(
     ds.SOPClassUID = SecondaryCaptureImageStorage
     ds.SOPInstanceUID = generate_uid()
 
-    # Multi-frame attention map description
-    ds.StudyDescription = "AI Attention Map Visualization"
-    ds.SeriesDescription = f"{AI_NAME} - Attention Heatmap"
+    # Multi-frame attention heatmap description
+    ds.StudyDescription = "AI Attention Heatmap Visualization"
+    ds.SeriesDescription = f"{AI_NAME} - Complete 3D Attention Heatmap"
 
     # Add AI model metadata
     ds.ManufacturerModelName = AI_NAME
@@ -186,34 +188,21 @@ def create_multiframe_attention_sc(
         ds.InstanceCreationDate = datetime.now().strftime("%Y%m%d")
         ds.InstanceCreationTime = datetime.now().strftime("%H%M%S.%f")[:-3]
 
-    # Process all attention maps and stack them as frames
+    # Process RGB overlay slices - already computed by tensor_cam2image in MST model
+    # Each slice is RGB overlay [H, W, 3] with MRI + attention heatmap blended
     frames_pixel_data = []
-    original_pixel_array = original_dicom.pixel_array
 
-    # Get base frame for dimension reference
-    if len(original_pixel_array.shape) == 4:
-        # Multi-frame original DICOM
-        base_frame = original_pixel_array[0]
-    else:
-        # Single frame original DICOM
-        base_frame = original_pixel_array
-
-    # Sort attention maps by slice_index to ensure proper ordering
+    # Sort attention maps by slice_index to ensure proper ordering (depth dimension)
     sorted_attention_maps = sorted(attention_maps, key=lambda x: x.get('slice_index', 0))
 
     for att_map_data in sorted_attention_maps:
-        slice_idx = att_map_data.get('slice_index', 0)
-        attention_array = np.array(att_map_data.get('data'))
+        # Get RGB overlay data [H, W, 3] - already blended by tensor_cam2image
+        overlay_rgb = np.array(att_map_data.get('data'), dtype=np.float32)
 
-        # Get corresponding original frame if multi-frame
-        if len(original_pixel_array.shape) == 4 and slice_idx < len(original_pixel_array):
-            pixel_frame = original_pixel_array[slice_idx]
-        else:
-            pixel_frame = base_frame
+        # Convert from [0, 1] float to [0, 255] uint8 RGB format
+        overlay_rgb_uint8 = (overlay_rgb * 255).astype(np.uint8)
 
-        # Apply attention overlay
-        processed_frame = apply_attention_overlay(pixel_frame, attention_array, alpha=0.5)
-        frames_pixel_data.append(processed_frame)
+        frames_pixel_data.append(overlay_rgb_uint8)
 
     # Stack all frames into single array
     stacked_frames = np.stack(frames_pixel_data, axis=0)  # Shape: [num_frames, rows, cols, 3]
@@ -811,7 +800,7 @@ def OnStableStudy(changeType, level, resourceId):
                 model_response = requests.post(
                     f"{MODEL_BACKEND_URL}/analyze/mri",
                     json={"seriesInstanceUID": series_instance_uid},
-                    timeout=100,
+                    timeout=1000,
                 )
 
                 if model_response.status_code != 200:
@@ -845,17 +834,17 @@ def OnStableStudy(changeType, level, resourceId):
                     dicom_objects_to_upload = [(sc_bytes, "SC-Text"), (sr_bytes, "SR-Bilateral")]
 
                 elif response_format == "bilateral_with_heatmap":
-                    # Process bilateral classification results with attention maps (MST model)
-                    print(f"Processing bilateral classification with attention maps")
+                    # Process bilateral classification with RGB overlay heatmaps (MST model)
+                    print(f"Processing bilateral classification with RGB overlay heatmaps")
 
                     sr_bytes, current_date, current_time, sr_sop_instance_uid = (
                         create_bilateral_sr(original_dicom, model_results)
                     )
                     dicom_objects_to_upload.append((sr_bytes, "SR-Bilateral-MST"))
 
-                    # Create single multi-frame SC with all attention maps stacked
+                    # Create single multi-frame SC with RGB overlays from tensor_cam2image
                     attention_maps = model_results.get("attention_maps", [])
-                    print(f"Creating multi-frame SC with {len(attention_maps)} attention map slices")
+                    print(f"Received {len(attention_maps)} RGB overlay slices (already blended by MST model)")
 
                     if attention_maps:
                         sc_bytes = create_multiframe_attention_sc(
@@ -865,10 +854,10 @@ def OnStableStudy(changeType, level, resourceId):
                             creation_time=current_time,
                             sr_sop_instance_uid=sr_sop_instance_uid,
                         )
-                        dicom_objects_to_upload.append((sc_bytes, "SC-MultiFrame-Attention"))
-                        print(f"Multi-frame attention SC created with {len(attention_maps)} frames")
+                        dicom_objects_to_upload.append((sc_bytes, "SC-MultiFrame-RGB-Overlay"))
+                        print(f"Multi-frame SC created with {len(attention_maps)} RGB overlay frames")
                     else:
-                        print("No attention maps found in model results")
+                        print("WARNING: No attention maps found in model results")
 
                 # Upload all DICOM objects to orthanc-viewer
                 for dicom_bytes, desc in dicom_objects_to_upload:
