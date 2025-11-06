@@ -664,16 +664,7 @@ def OnStableStudy(changeType, level, resourceId):
                     sr_bytes, current_date, current_time, sr_sop_instance_uid = (
                         create_bilateral_sr(original_dicom, model_results)
                     )
-                    sc_bytes = create_text_overlay_sc(
-                        original_dicom,
-                        AI_TEXT,
-                        AI_COLOR,
-                        current_date,
-                        current_time,
-                        model_results,
-                        sr_sop_instance_uid,
-                    )
-                    dicom_objects_to_upload = [(sc_bytes, "SC-Text"), (sr_bytes, "SR-Bilateral")]
+                    dicom_objects_to_upload = [(sr_bytes, "SR-Bilateral")]
 
                 elif response_format == "bilateral_with_heatmap":
                     # Process bilateral classification with RGB overlay heatmaps (MST model)
