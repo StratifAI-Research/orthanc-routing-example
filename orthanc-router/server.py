@@ -3,6 +3,7 @@ import io
 import json
 import os
 from datetime import datetime
+import base64
 
 import numpy as np
 import orthanc
@@ -95,8 +96,8 @@ def create_multiframe_attention_sc(
 
     Args:
         original_dicom: Original DICOM dataset
-        attention_maps: List of ALL RGB overlay slices with 'slice_index' and 'data' keys
-                       Each 'data' is RGB overlay [H, W, 3] created by tensor_cam2image in MST model
+        attention_maps: Dict with 'data' (base64 encoded bytes), 'shape', and 'dtype' keys
+                       Contains ALL RGB overlay slices as base64-encoded numpy array
         creation_date: Instance creation date
         creation_time: Instance creation time
         sr_sop_instance_uid: Reference to SR document
@@ -144,30 +145,23 @@ def create_multiframe_attention_sc(
         ds.InstanceCreationDate = datetime.now().strftime("%Y%m%d")
         ds.InstanceCreationTime = datetime.now().strftime("%H%M%S.%f")[:-3]
 
-    # Process RGB overlay slices - already computed by tensor_cam2image in MST model
-    # Each slice is RGB overlay [H, W, 3] with MRI + attention heatmap blended
-    frames_pixel_data = []
+    # Decode base64 RGB overlay data from MST model (already uint8, already blended)
+    overlay_b64 = attention_maps.get('data')
+    overlay_shape = tuple(attention_maps.get('shape'))  # [num_frames, rows, cols, 3]
 
-    # Sort attention maps by slice_index to ensure proper ordering (depth dimension)
-    sorted_attention_maps = sorted(attention_maps, key=lambda x: x.get('slice_index', 0))
+    print(f"Decoding base64 overlay data with shape: {overlay_shape}")
 
-    for att_map_data in sorted_attention_maps:
-        # Get RGB overlay data [H, W, 3] - already blended by tensor_cam2image
-        overlay_rgb = np.array(att_map_data.get('data'), dtype=np.float32)
+    # Decode base64 and reshape to original array
+    overlay_bytes = base64.b64decode(overlay_b64)
+    stacked_frames = np.frombuffer(overlay_bytes, dtype=np.uint8).reshape(overlay_shape)
 
-        # Convert from [0, 1] float to [0, 255] uint8 RGB format
-        overlay_rgb_uint8 = (overlay_rgb * 255).astype(np.uint8)
-
-        frames_pixel_data.append(overlay_rgb_uint8)
-
-    # Stack all frames into single array
-    stacked_frames = np.stack(frames_pixel_data, axis=0)  # Shape: [num_frames, rows, cols, 3]
+    print(f"Decoded overlay shape: {stacked_frames.shape}")
 
     # Set multi-frame attributes
-    num_frames = len(frames_pixel_data)
+    num_frames = stacked_frames.shape[0]
     ds.NumberOfFrames = num_frames
 
-    # Set image dimensions (from first frame)
+    # Set image dimensions: stacked_frames is [num_frames, rows, cols, 3]
     ds.Rows, ds.Columns, ds.SamplesPerPixel = stacked_frames.shape[1:]
 
     # Set pixel data attributes
@@ -691,10 +685,11 @@ def OnStableStudy(changeType, level, resourceId):
                     dicom_objects_to_upload.append((sr_bytes, "SR-Bilateral-MST"))
 
                     # Create single multi-frame SC with RGB overlays from tensor_cam2image
-                    attention_maps = model_results.get("attention_maps", [])
-                    print(f"Received {len(attention_maps)} RGB overlay slices (already blended by MST model)")
+                    attention_maps = model_results.get("attention_maps", {})
+                    num_frames = attention_maps.get("shape", [0])[0] if attention_maps else 0
+                    print(f"Received base64-encoded RGB overlay data with {num_frames} frames")
 
-                    if attention_maps:
+                    if attention_maps and attention_maps.get("data"):
                         sc_bytes = create_multiframe_attention_sc(
                             original_dicom,
                             attention_maps,
@@ -703,7 +698,7 @@ def OnStableStudy(changeType, level, resourceId):
                             sr_sop_instance_uid=sr_sop_instance_uid,
                         )
                         dicom_objects_to_upload.append((sc_bytes, "SC-MultiFrame-RGB-Overlay"))
-                        print(f"Multi-frame SC created with {len(attention_maps)} RGB overlay frames")
+                        print(f"Multi-frame SC created with {num_frames} RGB overlay frames")
                     else:
                         print("WARNING: No attention maps found in model results")
 
