@@ -2,6 +2,7 @@ import datetime
 import io
 import json
 import os
+import time
 from datetime import datetime
 import base64
 
@@ -90,17 +91,19 @@ def create_multiframe_attention_sc(
     creation_date=None,
     creation_time=None,
     sr_sop_instance_uid=None,
+    slice_spacing=1.0,
 ):
     """
     Create multi-frame DICOM Secondary Capture for complete attention heatmap volume
 
     Args:
-        original_dicom: Original DICOM dataset
+        original_dicom: Original DICOM dataset (first instance for spatial reference)
         attention_maps: Dict with 'data' (base64 encoded bytes), 'shape', and 'dtype' keys
                        Contains ALL RGB overlay slices as base64-encoded numpy array
         creation_date: Instance creation date
         creation_time: Instance creation time
         sr_sop_instance_uid: Reference to SR document
+        slice_spacing: Actual slice spacing in mm from original DICOM
 
     Returns:
         DICOM bytes containing complete 3D RGB overlay heatmap as multi-frame SC
@@ -122,6 +125,20 @@ def create_multiframe_attention_sc(
         "StudyID",
     ]:
         setattr(ds, tag, getattr(original_dicom, tag, None))
+
+    # Copy spatial reference tags for synchronization
+    # These allow OHIF to sync heatmap with original series
+    if hasattr(original_dicom, 'FrameOfReferenceUID'):
+        ds.FrameOfReferenceUID = original_dicom.FrameOfReferenceUID
+    else:
+        ds.FrameOfReferenceUID = generate_uid()
+        print("WARNING: Original DICOM missing FrameOfReferenceUID - sync may not work")
+
+    if hasattr(original_dicom, 'ImageOrientationPatient'):
+        ds.ImageOrientationPatient = original_dicom.ImageOrientationPatient
+    else:
+        ds.ImageOrientationPatient = [1, 0, 0, 0, 1, 0]  # Default axial
+        print("WARNING: Original DICOM missing ImageOrientationPatient - using default axial")
 
     # Set derived attributes
     ds.Modality = "SC"
@@ -174,6 +191,77 @@ def create_multiframe_attention_sc(
 
     # Convert stacked frames to bytes
     ds.PixelData = stacked_frames.tobytes()
+
+    # Add per-frame spatial metadata for synchronization
+    original_position = getattr(original_dicom, 'ImagePositionPatient', None)
+    original_orientation = getattr(original_dicom, 'ImageOrientationPatient', None)
+
+    if original_position and original_orientation and num_frames > 1:
+        # Calculate slice normal vector for position calculation
+        row_cosines = np.array(original_orientation[:3])
+        col_cosines = np.array(original_orientation[3:])
+        slice_normal = np.cross(row_cosines, col_cosines)
+
+        # Use actual spacing from original DICOM
+        pixel_spacing = [1.0, 1.0]  # mm - normalized by model (in-plane)
+        # slice_spacing parameter passed from actual DICOM measurement
+
+        # Create per-frame functional groups
+        per_frame_groups = Sequence()
+
+        for frame_idx in range(num_frames):
+            frame_item = Dataset()
+
+            # Frame Content Sequence
+            frame_content_seq = Sequence()
+            frame_content = Dataset()
+            frame_content.FrameAcquisitionNumber = frame_idx + 1
+            frame_content.StackID = "1"
+            frame_content.InStackPositionNumber = frame_idx + 1
+            frame_content_seq.append(frame_content)
+            frame_item.FrameContentSequence = frame_content_seq
+
+            # Plane Position Sequence - calculate position for each frame
+            plane_position_seq = Sequence()
+            plane_position = Dataset()
+
+            # Calculate position: original + (frame_idx * spacing * normal_vector)
+            position = np.array(original_position) + (frame_idx * slice_spacing * slice_normal)
+            plane_position.ImagePositionPatient = position.tolist()
+
+            plane_position_seq.append(plane_position)
+            frame_item.PlanePositionSequence = plane_position_seq
+
+            per_frame_groups.append(frame_item)
+
+        ds.PerFrameFunctionalGroupsSequence = per_frame_groups
+
+        # Shared Functional Groups (same orientation for all frames)
+        shared_groups = Sequence()
+        shared_item = Dataset()
+
+        # Plane Orientation (same for all frames)
+        plane_orientation_seq = Sequence()
+        plane_orientation = Dataset()
+        plane_orientation.ImageOrientationPatient = original_orientation
+        plane_orientation_seq.append(plane_orientation)
+        shared_item.PlaneOrientationSequence = plane_orientation_seq
+
+        # Pixel Measures with model's normalized spacing
+        pixel_measures_seq = Sequence()
+        pixel_measures = Dataset()
+        pixel_measures.PixelSpacing = pixel_spacing
+        pixel_measures.SliceThickness = slice_spacing
+        pixel_measures_seq.append(pixel_measures)
+        shared_item.PixelMeasuresSequence = pixel_measures_seq
+
+        shared_groups.append(shared_item)
+        ds.SharedFunctionalGroupsSequence = shared_groups
+
+        print(f"Added spatial metadata: {num_frames} frames with {slice_spacing}mm uniform spacing")
+    else:
+        print(f"WARNING: Cannot calculate per-frame positions (has_position={bool(original_position)}, has_orientation={bool(original_orientation)}, frames={num_frames})")
+        print("Heatmap synchronization may not work correctly")
 
     # Add reference to original image
     ref_image_sequence = Sequence()
@@ -520,8 +608,8 @@ def create_bilateral_sr(original_ds, model_results):
                 )
             ]
 
-            # Map "Cancerous" to malignant and "Not Cancerous" to benign
-            is_malignant = model_results[side]["prediction"] == "Cancerous"
+            # Check if prediction is malignant
+            is_malignant = model_results[side]["prediction"] == "Malignant"
             finding_item.ConceptCodeSequence = [
                 create_code_sequence(
                     code_value="86049000" if is_malignant else "108369006",
@@ -619,31 +707,123 @@ def detect_response_format(model_results):
 def OnStableStudy(changeType, level, resourceId):
     if changeType == orthanc.ChangeType.STABLE_STUDY:
         print(f"Processing stable study: {resourceId}")
+        print(f"TIMING: onstablestudy_callback_fired: 0.00ms")  # Marker for when callback fires
+        overall_start = time.time()
 
         try:
             # Get study instances
+            step_start = time.time()
             instances = json.loads(
                 orthanc.RestApiGet(f"/studies/{resourceId}/instances")
             )
+            step_duration = (time.time() - step_start) * 1000
+            print(f"TIMING: get_study_instances: {step_duration:.2f}ms")
+
             if not instances:
                 print(f"No instances in study {resourceId}")
                 return
 
-            # Process first instance
-            instance_id = instances[0]["ID"]
+            # Find the most recently uploaded series (the one that triggered this callback)
+            # Group instances by series and find the one with highest InternalNumber (most recent upload)
+            step_start = time.time()
+            series_map = {}
+            for instance in instances:
+                instance_details = json.loads(
+                    orthanc.RestApiGet(f"/instances/{instance['ID']}")
+                )
+                series_id = instance_details.get("ParentSeries")
+                internal_number = instance_details.get("IndexInSeries", 0)
+
+                if series_id not in series_map:
+                    series_map[series_id] = {
+                        "instance_id": instance['ID'],
+                        "max_internal_number": internal_number,
+                        "instance_count": 0
+                    }
+                series_map[series_id]["instance_count"] += 1
+                # Track the highest internal number (newest instance) in this series
+                if internal_number > series_map[series_id]["max_internal_number"]:
+                    series_map[series_id]["max_internal_number"] = internal_number
+                    series_map[series_id]["instance_id"] = instance['ID']
+
+            # Find the series with the highest max_internal_number (most recently uploaded)
+            most_recent_series_id = max(
+                series_map.keys(),
+                key=lambda sid: series_map[sid]["max_internal_number"]
+            )
+
+            print(f"Detected most recently uploaded series: {most_recent_series_id} "
+                  f"with {series_map[most_recent_series_id]['instance_count']} instances")
+
+            # Use an instance from the most recent series
+            instance_id = series_map[most_recent_series_id]["instance_id"]
+            step_duration = (time.time() - step_start) * 1000
+            print(f"TIMING: detect_most_recent_series: {step_duration:.2f}ms")
+
+            # Process the instance from the most recent series
+            step_start = time.time()
             dicom_buffer = orthanc.GetDicomForInstance(instance_id)
             original_dicom = dcmread(io.BytesIO(dicom_buffer))
+            step_duration = (time.time() - step_start) * 1000
+            print(f"TIMING: read_original_dicom: {step_duration:.2f}ms")
 
             # Get series instance UID
             series_instance_uid = original_dicom.SeriesInstanceUID
+            print(f"Processing series UID: {series_instance_uid}")
+
+            # Get the FIRST instance for spatial metadata (for heatmap synchronization)
+            # Query all instances in the series and find the one with lowest InstanceNumber
+            step_start = time.time()
+            series_info_json = orthanc.RestApiGet(f"/series/{most_recent_series_id}")
+            series_info = json.loads(series_info_json)
+            all_instance_ids = series_info["Instances"]
+
+            first_instance_id = None
+            min_instance_number = float('inf')
+
+            for inst_id in all_instance_ids:
+                inst_tags_json = orthanc.RestApiGet(f"/instances/{inst_id}/tags?simplify")
+                inst_tags = json.loads(inst_tags_json)
+                instance_num = int(inst_tags.get("InstanceNumber", 9999))
+                if instance_num < min_instance_number:
+                    min_instance_number = instance_num
+                    first_instance_id = inst_id
+
+            if first_instance_id:
+                first_dicom_buffer = orthanc.GetDicomForInstance(first_instance_id)
+                first_instance_dicom = dcmread(io.BytesIO(first_dicom_buffer))
+                print(f"Found first instance: InstanceNumber={min_instance_number}")
+            else:
+                first_instance_dicom = original_dicom
+                print("WARNING: Could not find first instance, using current instance")
+
+            slice_spacing = None
+
+            # Get slice spacing from DICOM tags
+            if hasattr(first_instance_dicom, 'SpacingBetweenSlices'):
+                slice_spacing = float(first_instance_dicom.SpacingBetweenSlices)
+                print(f"Using SpacingBetweenSlices: {slice_spacing}mm")
+            elif hasattr(first_instance_dicom, 'SliceThickness'):
+                slice_spacing = float(first_instance_dicom.SliceThickness)
+                print(f"Using SliceThickness: {slice_spacing}mm")
+
+            if not slice_spacing:
+                slice_spacing = 1.0
+                print("WARNING: Could not get slice spacing from DICOM tags, using default 1.0mm")
+
+            step_duration = (time.time() - step_start) * 1000
+            print(f"TIMING: find_first_instance: {step_duration:.2f}ms")
 
             # Call the model backend
             try:
+                step_start = time.time()
                 model_response = requests.post(
                     f"{MODEL_BACKEND_URL}/analyze/mri",
                     json={"seriesInstanceUID": series_instance_uid},
                     timeout=1000,
                 )
+                step_duration = (time.time() - step_start) * 1000
+                print(f"TIMING: model_backend_request: {step_duration:.2f}ms")
 
                 if model_response.status_code != 200:
                     print(
@@ -654,6 +834,7 @@ def OnStableStudy(changeType, level, resourceId):
                 model_results = model_response.json()
 
                 # Detect response format and process accordingly
+                step_start = time.time()
                 response_format = detect_response_format(model_results)
                 print(f"Detected response format: {response_format}")
 
@@ -661,18 +842,24 @@ def OnStableStudy(changeType, level, resourceId):
 
                 if response_format == "bilateral":
                     # Process basic bilateral classification results (no heatmap)
+                    sr_start = time.time()
                     sr_bytes, current_date, current_time, sr_sop_instance_uid = (
                         create_bilateral_sr(original_dicom, model_results)
                     )
+                    sr_duration = (time.time() - sr_start) * 1000
+                    print(f"TIMING: create_bilateral_sr: {sr_duration:.2f}ms")
                     dicom_objects_to_upload = [(sr_bytes, "SR-Bilateral")]
 
                 elif response_format == "bilateral_with_heatmap":
                     # Process bilateral classification with RGB overlay heatmaps (MST model)
                     print(f"Processing bilateral classification with RGB overlay heatmaps")
 
+                    sr_start = time.time()
                     sr_bytes, current_date, current_time, sr_sop_instance_uid = (
                         create_bilateral_sr(original_dicom, model_results)
                     )
+                    sr_duration = (time.time() - sr_start) * 1000
+                    print(f"TIMING: create_bilateral_sr: {sr_duration:.2f}ms")
                     dicom_objects_to_upload.append((sr_bytes, "SR-Bilateral-MST"))
 
                     # Create single multi-frame SC with RGB overlays from tensor_cam2image
@@ -681,26 +868,37 @@ def OnStableStudy(changeType, level, resourceId):
                     print(f"Received base64-encoded RGB overlay data with {num_frames} frames")
 
                     if attention_maps and attention_maps.get("data"):
+                        sc_start = time.time()
                         sc_bytes = create_multiframe_attention_sc(
-                            original_dicom,
+                            first_instance_dicom,  # Use first instance for correct spatial metadata
                             attention_maps,
                             creation_date=current_date,
                             creation_time=current_time,
                             sr_sop_instance_uid=sr_sop_instance_uid,
+                            slice_spacing=slice_spacing,  # Use actual spacing from DICOM
                         )
+                        sc_duration = (time.time() - sc_start) * 1000
+                        print(f"TIMING: create_multiframe_attention_sc: {sc_duration:.2f}ms")
                         dicom_objects_to_upload.append((sc_bytes, "SC-MultiFrame-RGB-Overlay"))
                         print(f"Multi-frame SC created with {num_frames} RGB overlay frames")
                     else:
                         print("WARNING: No attention maps found in model results")
 
+                step_duration = (time.time() - step_start) * 1000
+                print(f"TIMING: create_dicom_objects_total: {step_duration:.2f}ms")
+
                 # Upload all DICOM objects to orthanc-viewer
+                upload_start = time.time()
                 for dicom_bytes, desc in dicom_objects_to_upload:
+                    upload_item_start = time.time()
                     response = requests.post(
                         "http://orthanc-viewer:8042/instances",
                         data=dicom_bytes,
                         headers={"Content-Type": "application/dicom"},
                         timeout=10,
                     )
+                    upload_item_duration = (time.time() - upload_item_start) * 1000
+                    print(f"TIMING: upload_{desc}: {upload_item_duration:.2f}ms")
 
                     if response.status_code == 200:
                         print(
@@ -714,12 +912,19 @@ def OnStableStudy(changeType, level, resourceId):
                             f"Response content: {response.text[:200]}"
                         )  # Truncated for logs
 
+                upload_duration = (time.time() - upload_start) * 1000
+                print(f"TIMING: upload_all_to_viewer: {upload_duration:.2f}ms")
+
             except requests.exceptions.RequestException as e:
                 print(f"Network error calling model backend: {str(e)}")
             except Exception as e:
                 print(f"Error processing model results: {str(e)}")
                 import traceback
                 traceback.print_exc()
+
+            # Log total processing time
+            overall_duration = (time.time() - overall_start) * 1000
+            print(f"TIMING: total_study_processing: {overall_duration:.2f}ms")
 
         except Exception as e:
             print(f"Error processing study {resourceId}: {str(e)}")
