@@ -487,9 +487,13 @@ def SendToAiDicomWeb(output, uri, **request):
             )
 
             # Send the request using direct HTTP request
+            import time
+            stow_start = time.time()
             stow_response = requests.post(
                 f"http://localhost:8042/dicom-web/servers/{target}/stow", json=stow_body
             )
+            stow_duration = (time.time() - stow_start) * 1000
+            print(f"TIMING: stow_rs_transfer: {stow_duration:.2f}ms")
 
             print(
                 f"SendToAiDicomWeb: STOW-RS response status: {stow_response.status_code}"
