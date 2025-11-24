@@ -608,13 +608,27 @@ def create_bilateral_sr(original_ds, model_results):
                 )
             ]
 
-            # Check if prediction is malignant
-            is_malignant = model_results[side]["prediction"] == "Malignant"
+            # Map prediction to SNOMED CT code (3-class classification)
+            prediction = model_results[side]["prediction"]
+            if prediction == "Malignant":
+                code_value = "86049000"
+                code_meaning = "Malignant"
+            elif prediction == "Benign":
+                code_value = "108369006"
+                code_meaning = "Benign"
+            elif prediction == "No lesion":
+                code_value = "373572006"
+                code_meaning = "Clinical finding absent"
+            else:
+                # Fallback for unknown predictions
+                code_value = "261665006"
+                code_meaning = "Unknown"
+
             finding_item.ConceptCodeSequence = [
                 create_code_sequence(
-                    code_value="86049000" if is_malignant else "108369006",
+                    code_value=code_value,
                     coding_scheme="SCT",
-                    code_meaning="Malignant" if is_malignant else "Benign",
+                    code_meaning=code_meaning,
                 )
             ]
 
