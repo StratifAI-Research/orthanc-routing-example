@@ -21,6 +21,16 @@ try:
 except Exception:
     register_feedback_endpoints = None
 
+# UPS storage for workitem persistence
+try:
+    from ups.storage import UPSStorage
+    from ups.workitem import UPSWorkitem
+
+    ups_storage = UPSStorage()
+except Exception as e:
+    print(f"Warning: Could not initialize UPS storage: {e}")
+    ups_storage = None
+
 
 def FilterAIResultSeries(study_id):
     """
@@ -480,52 +490,110 @@ def SendToAiDicomWeb(output, uri, **request):
                 f"SendToAiDicomWeb: Collected {len(instance_ids)} instances from {len(original_series)} series"
             )
 
-            # Prepare the STOW-RS request body with filtered instances
-            stow_body = {"Resources": instance_ids}
-            print(
-                f"SendToAiDicomWeb: Prepared STOW-RS request with {len(stow_body['Resources'])} instances from original series"
-            )
+            # NEW: Create UPS workitem on router before sending data
+            # Extract router URL from target_url (remove /dicom-web suffix if present)
+            router_base_url = target_url.replace("/dicom-web", "").rstrip("/")
 
-            # Send the request using direct HTTP request
-            import time
-            stow_start = time.time()
-            stow_response = requests.post(
-                f"http://localhost:8042/dicom-web/servers/{target}/stow", json=stow_body
-            )
-            stow_duration = (time.time() - stow_start) * 1000
-            print(f"TIMING: stow_rs_transfer: {stow_duration:.2f}ms")
+            # Get study UID
+            study_uid = GetStudyInstanceUID(study_id)
+            if not study_uid:
+                print("SendToAiDicomWeb: Could not get StudyInstanceUID")
+                output.SendHttpStatus(500, "Could not get StudyInstanceUID")
+                return
 
-            print(
-                f"SendToAiDicomWeb: STOW-RS response status: {stow_response.status_code}"
-            )
-            print(f"SendToAiDicomWeb: STOW-RS response: {stow_response.text}")
-
-            # Process response
-            if stow_response.status_code in [200, 201, 202]:
+            # Get series UIDs (DICOM UIDs, not Orthanc IDs)
+            dicom_series_uids = []
+            for series_id in original_series:
                 try:
-                    response_data = stow_response.json()
-                    print("SendToAiDicomWeb: Successfully sent study via DICOMweb")
-
-                    # Return success response
-                    success_response = {
-                        "status": "success",
-                        "message": f"Successfully sent study {study_id} to {target} using DICOMweb protocol",
-                        "study_id": study_id,
-                        "target": target,
-                        "response": response_data,
-                    }
-                    print("SendToAiDicomWeb: Returning success response")
-                    output.AnswerBuffer(
-                        json.dumps(success_response), "application/json"
-                    )
+                    series_info = json.loads(orthanc.RestApiGet(f"/series/{series_id}"))
+                    series_dicom_uid = series_info.get("MainDicomTags", {}).get("SeriesInstanceUID")
+                    if series_dicom_uid:
+                        dicom_series_uids.append(series_dicom_uid)
                 except Exception as e:
-                    error_message = f"Error processing STOW-RS response: {str(e)}"
-                    print(f"SendToAiDicomWeb: {error_message}")
-                    output.SendHttpStatus(500, error_message)
-            else:
-                error_message = f"DICOMweb error: {stow_response.status_code} - {stow_response.text}"
+                    print(f"Warning: Could not get SeriesInstanceUID for {series_id}: {str(e)}")
+
+            # Create UPS workitem on router
+            try:
+                ups_workitem_request = {
+                    "study_uid": study_uid,
+                    "series_uids": dicom_series_uids,
+                    "wado_rs_base": "http://orthanc-viewer:8042/dicom-web",
+                    "priority": "MEDIUM"
+                }
+
+                post_url = f"{router_base_url}/ups-rs/workitems"
+                print(f"SendToAiDicomWeb: Creating UPS workitem on router at {post_url}")
+                print(f"SendToAiDicomWeb: Request body: {json.dumps(ups_workitem_request)}")
+
+                ups_response = requests.post(
+                    post_url,
+                    json=ups_workitem_request,
+                    headers={"Content-Type": "application/json"},
+                    timeout=10
+                )
+
+                print(f"SendToAiDicomWeb: POST response status: {ups_response.status_code}")
+                if ups_response.status_code in [200, 201]:
+                    ups_workitem_data = ups_response.json()
+                    workitem_uid = ups_workitem_data.get("00080018", {}).get("Value", [None])[0]
+                    print(f"SendToAiDicomWeb: Created UPS workitem on router: {workitem_uid}")
+
+                    # Subscribe to workitem notifications (RAD-86)
+                    try:
+                        subscribe_url = f"{router_base_url}/ups-rs/workitems/{workitem_uid}/subscribers"
+                        subscribe_body = {
+                            "subscriber_url": "http://orthanc-viewer:8042",
+                            "deletion_lock": False
+                        }
+                        subscribe_response = requests.post(
+                            subscribe_url,
+                            json=subscribe_body,
+                            timeout=5
+                        )
+                        if subscribe_response.status_code == 200:
+                            print(f"SendToAiDicomWeb: Successfully subscribed to workitem {workitem_uid}")
+                        else:
+                            print(f"SendToAiDicomWeb: Subscription failed: {subscribe_response.status_code}")
+                    except Exception as e:
+                        print(f"SendToAiDicomWeb: Error subscribing to workitem: {str(e)}")
+                else:
+                    print(f"SendToAiDicomWeb: Failed to create UPS workitem: {ups_response.status_code} - {ups_response.text}")
+                    workitem_uid = None
+            except Exception as e:
+                print(f"SendToAiDicomWeb: Error creating UPS workitem: {str(e)}")
+                import traceback
+                traceback.print_exc()
+                workitem_uid = None
+
+            # Check if workitem creation succeeded
+            if workitem_uid is None:
+                error_message = "Failed to create UPS workitem on router"
                 print(f"SendToAiDicomWeb: {error_message}")
-                output.SendHttpStatus(stow_response.status_code, error_message)
+                error_response = {
+                    "status": "error",
+                    "message": error_message
+                }
+                output.AnswerBuffer(json.dumps(error_response), "application/json")
+                return
+
+            # UPS-RS: No data transfer to router
+            # Data stays in viewer, router retrieves via WADO-RS when processing
+            print("SendToAiDicomWeb: UPS workitem created, no data transfer to router")
+
+            # Return success response with workitem UID for tracking
+            success_response = {
+                "status": "success",
+                "message": f"UPS workitem created for study {study_id}",
+                "study_id": study_id,
+                "target": target,
+                "workitem_uid": workitem_uid,
+                "series_count": len(original_series),
+            }
+            print(f"SendToAiDicomWeb: Returning success response with workitem_uid={workitem_uid}")
+            print(f"SendToAiDicomWeb: Full response: {json.dumps(success_response)}")
+            output.AnswerBuffer(
+                json.dumps(success_response), "application/json"
+            )
 
         except Exception as e:
             error_message = f"Error during STOW-RS request: {str(e)}"
@@ -545,10 +613,89 @@ def SendToAi(output, uri, **request):
     SendToAiDicomWeb(output, uri, **request)
 
 
+# UPS-RS endpoints for receiving workitem updates from router
+def UPSUpdateWorkitem(output, uri, **request):
+    """
+    POST /ups-rs/workitems/{uid}
+    Receive workitem state updates from router
+    """
+    if request["method"] != "POST":
+        output.SendMethodNotAllowed("POST")
+        return
+
+    try:
+        workitem_uid = uri.split('/')[-1]
+        body = json.loads(request["body"])
+
+        # Store workitem using UPS storage
+        if ups_storage:
+            # Use from_json method with JSON string
+            workitem = UPSWorkitem.from_json(request["body"], workitem_uid)
+            ups_storage.store_workitem(workitem)
+            state = workitem.get_state()
+        else:
+            # Fallback: just log if storage not available
+            state = body.get('00741000', {}).get('Value', ['UNKNOWN'])[0]
+
+        print(f"Received workitem update: {workitem_uid}, state: {state}")
+
+        output.AnswerBuffer(json.dumps({"status": "updated"}), "application/json")
+    except Exception as e:
+        print(f"Error updating workitem: {str(e)}")
+        output.SendHttpStatus(500, str(e))
+
+
+def UPSGetWorkitem(output, uri, **request):
+    """
+    GET /ups-rs/workitems/{uid}
+    Retrieve workitem from local storage (updated via router notifications)
+    """
+    if request["method"] != "GET":
+        output.SendMethodNotAllowed("GET")
+        return
+
+    try:
+        workitem_uid = uri.split('/')[-1]
+        print(f"UPSGetWorkitem: Retrieving workitem {workitem_uid} from local storage")
+
+        if not ups_storage:
+            output.SendHttpStatus(500, "UPS storage not initialized")
+            return
+
+        workitem = ups_storage.get_workitem(workitem_uid)
+        if workitem:
+            output.AnswerBuffer(workitem.to_json(), "application/dicom+json")
+        else:
+            print(f"UPSGetWorkitem: Workitem {workitem_uid} not found")
+            output.SendHttpStatus(404, f"Workitem {workitem_uid} not found")
+
+    except Exception as e:
+        print(f"Error retrieving workitem: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        output.SendHttpStatus(500, str(e))
+
+
+def UPSWorkitemHandler(output, uri, **request):
+    """
+    Unified handler for UPS-RS workitem endpoints
+    Routes to appropriate handler based on HTTP method
+    """
+    if request["method"] == "POST":
+        UPSUpdateWorkitem(output, uri, **request)
+    elif request["method"] == "GET":
+        UPSGetWorkitem(output, uri, **request)
+    else:
+        output.SendMethodNotAllowed("GET, POST")
+
+
 # Register the REST endpoints
 orthanc.RegisterRestCallback("/send-to-ai", SendToAi)
 orthanc.RegisterRestCallback("/send-to-ai-dicom", SendToAiDicom)
 orthanc.RegisterRestCallback("/send-to-ai-dicomweb", SendToAiDicomWeb)
+
+# Register UPS-RS endpoints for receiving workitem updates
+orthanc.RegisterRestCallback("/ups-rs/workitems/(.*)", UPSWorkitemHandler)
 
 # Register feedback routes
 if register_feedback_endpoints is not None:
