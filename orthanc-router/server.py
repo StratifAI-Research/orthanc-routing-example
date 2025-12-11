@@ -20,6 +20,9 @@ from pydicom.uid import (
     generate_uid,
 )
 
+# UPS-RS functionality
+from ups.routes import register_ups_routes
+
 # Configuration
 MODEL_BACKEND_URL = os.environ.get(
     "MODEL_BACKEND_URL", "http://breast-cancer-classification:5555"
@@ -946,5 +949,8 @@ def OnStableStudy(changeType, level, resourceId):
             traceback.print_exc()
 
 
-# Register the callback function
-orthanc.RegisterOnChangeCallback(OnStableStudy)
+# Register UPS-RS REST endpoints (UPS-based workflow)
+register_ups_routes()
+
+# Note: OnStableStudy callback removed - now using UPS workflow
+# Workitems are created by orthanc-viewer and sent to /ups-rs/workitems
