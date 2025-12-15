@@ -138,7 +138,7 @@ def process_workitem(workitem):
             if model_response.status_code != 200:
                 error_msg = f"Model error: {model_response.status_code} - {model_response.text}"
                 print(error_msg)
-                workitem.update_state("CANCELED", error_msg)
+                workitem.update_state("CANCELED", cancellation_reason=error_msg)
                 ups_storage.store_workitem(workitem)
                 notify_all_subscribers(workitem)
                 return
@@ -148,7 +148,7 @@ def process_workitem(workitem):
         except requests.exceptions.RequestException as e:
             error_msg = f"Network error calling model: {str(e)}"
             print(error_msg)
-            workitem.update_state("CANCELED", error_msg)
+            workitem.update_state("CANCELED", cancellation_reason=error_msg)
             ups_storage.store_workitem(workitem)
             notify_all_subscribers(workitem)
             return
@@ -292,7 +292,7 @@ def process_workitem(workitem):
             print(error_msg)
             import traceback
             traceback.print_exc()
-            workitem.update_state("CANCELED", error_msg)
+            workitem.update_state("CANCELED", cancellation_reason=error_msg)
             ups_storage.store_workitem(workitem)
             notify_all_subscribers(workitem)
             return
@@ -312,7 +312,8 @@ def process_workitem(workitem):
         import traceback
         traceback.print_exc()
         try:
-            workitem.update_state("CANCELED", error_msg)
+            workitem.update_state("CANCELED", cancellation_reason=error_msg)
             ups_storage.store_workitem(workitem)
+            notify_all_subscribers(workitem)
         except:
             pass  # Best effort state update
