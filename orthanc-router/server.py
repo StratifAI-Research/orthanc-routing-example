@@ -95,6 +95,7 @@ def create_multiframe_attention_sc(
     creation_time=None,
     sr_sop_instance_uid=None,
     slice_spacing=1.0,
+    positions_list=None,
 ):
     """
     Create multi-frame DICOM Secondary Capture for complete attention heatmap volume
@@ -103,6 +104,11 @@ def create_multiframe_attention_sc(
         original_dicom: Original DICOM dataset (first instance for spatial reference)
         attention_maps: Dict with 'data' (base64 encoded bytes), 'shape', and 'dtype' keys
                        Contains ALL RGB overlay slices as base64-encoded numpy array
+        creation_date: DICOM creation date (YYYYMMDD)
+        creation_time: DICOM creation time (HHMMSS.ffffff)
+        sr_sop_instance_uid: SOP Instance UID of related SR
+        slice_spacing: Slice spacing in mm (used as fallback)
+        positions_list: List of actual ImagePositionPatient [x,y,z] for each frame (preferred)
         creation_date: Instance creation date
         creation_time: Instance creation time
         sr_sop_instance_uid: Reference to SR document
@@ -224,13 +230,19 @@ def create_multiframe_attention_sc(
             frame_content_seq.append(frame_content)
             frame_item.FrameContentSequence = frame_content_seq
 
-            # Plane Position Sequence - calculate position for each frame
+            # Plane Position Sequence - use actual position or calculate
             plane_position_seq = Sequence()
             plane_position = Dataset()
 
-            # Calculate position: original + (frame_idx * spacing * normal_vector)
-            position = np.array(original_position) + (frame_idx * slice_spacing * slice_normal)
-            plane_position.ImagePositionPatient = position.tolist()
+            # Use actual position from positions_list if available, otherwise calculate
+            if positions_list and frame_idx < len(positions_list):
+                position = positions_list[frame_idx]
+            else:
+                # Fallback: calculate position using spacing and normal vector
+                position = np.array(original_position) + (frame_idx * slice_spacing * slice_normal)
+                position = position.tolist()
+
+            plane_position.ImagePositionPatient = position
 
             plane_position_seq.append(plane_position)
             frame_item.PlanePositionSequence = plane_position_seq
@@ -261,7 +273,10 @@ def create_multiframe_attention_sc(
         shared_groups.append(shared_item)
         ds.SharedFunctionalGroupsSequence = shared_groups
 
-        print(f"Added spatial metadata: {num_frames} frames with {slice_spacing}mm uniform spacing")
+        if positions_list and len(positions_list) >= num_frames:
+            print(f"Added spatial metadata: {num_frames} frames using actual positions from original series")
+        else:
+            print(f"Added spatial metadata: {num_frames} frames with {slice_spacing}mm calculated spacing")
     else:
         print(f"WARNING: Cannot calculate per-frame positions (has_position={bool(original_position)}, has_orientation={bool(original_orientation)}, frames={num_frames})")
         print("Heatmap synchronization may not work correctly")

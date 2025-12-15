@@ -14,6 +14,7 @@ from pydicom import dcmread
 from pydicom.uid import generate_uid
 
 from ups.storage import ups_storage
+from wado_utils import retrieve_series_metadata_sorted
 
 
 # Get MODEL_BACKEND_URL from environment (configured per router instance in docker-compose)
@@ -161,67 +162,56 @@ def process_workitem(workitem):
                 create_multiframe_attention_sc
             )
 
-            # Get the first WADO-RS URL to retrieve original DICOM for SR/SC creation
-            first_retrieval = wado_rs_urls[0] if wado_rs_urls else None
-            if not first_retrieval:
-                raise Exception("No retrieval URLs in workitem")
-
-            # Update: Retrieving source images
+            # Update: Retrieving source metadata
             workitem.update_state(
                 "IN_PROGRESS",
                 progress_percent=70,
-                progress_description="Retrieving source images"
+                progress_description="Retrieving source metadata"
             )
             ups_storage.store_workitem(workitem)
             notify_all_subscribers(workitem)
 
-            # Retrieve a sample DICOM instance via WADO-RS from viewer (not local storage)
-            print(f"Retrieving sample DICOM via WADO-RS from {first_retrieval['retrieval_url']}")
+            # Get spatial metadata (metadata-only, no pixel data)
+            first_instance_meta, positions_list, slice_spacing = retrieve_series_metadata_sorted(wado_rs_urls)
 
-            try:
-                wado_response = requests.get(
-                    first_retrieval["retrieval_url"],
-                    headers={"Accept": "multipart/related; type=application/dicom; transfer-syntax=*"},
-                    timeout=60
-                )
+            # Create minimal Dataset with spatial tags only
+            from pydicom import Dataset
+            original_dicom = Dataset()
 
-                if wado_response.status_code != 200:
-                    raise Exception(f"WADO-RS retrieval failed: {wado_response.status_code}")
+            # Extract from DICOM JSON format (tag->Value structure)
+            ipp_tag = first_instance_meta.get("00200032")  # ImagePositionPatient
+            if ipp_tag and ipp_tag.get("Value"):
+                original_dicom.ImagePositionPatient = [float(v) for v in ipp_tag["Value"]]
 
-                # Parse multipart response to get first DICOM instance
-                content_type = wado_response.headers.get('Content-Type', '')
-                boundary = None
-                if 'boundary=' in content_type:
-                    for part in content_type.split(';'):
-                        part = part.strip()
-                        if part.startswith('boundary='):
-                            boundary = part.split('boundary=')[1].strip().strip('"')
-                            break
+            iop_tag = first_instance_meta.get("00200037")  # ImageOrientationPatient
+            if iop_tag and iop_tag.get("Value"):
+                original_dicom.ImageOrientationPatient = [float(v) for v in iop_tag["Value"]]
 
-                if not boundary:
-                    raise Exception("No boundary in WADO-RS response")
+            for_tag = first_instance_meta.get("00200052")  # FrameOfReferenceUID
+            if for_tag and for_tag.get("Value"):
+                original_dicom.FrameOfReferenceUID = for_tag["Value"][0]
 
-                # Simple parse: extract first DICOM part
-                parts = wado_response.content.split(f'--{boundary}'.encode())
-                original_dicom = None
+            # Copy required study/patient tags
+            tag_mapping = {
+                "00100010": "PatientName",      # Patient Name (PN - special handling)
+                "00100020": "PatientID",        # Patient ID
+                "0020000D": "StudyInstanceUID", # Study Instance UID
+                "00080016": "SOPClassUID",      # SOP Class UID
+                "00080018": "SOPInstanceUID"    # SOP Instance UID
+            }
 
-                for part in parts:
-                    if b'Content-Type: application/dicom' in part:
-                        # Find DICOM data after headers
-                        dicom_start = part.find(b'\r\n\r\n')
-                        if dicom_start != -1:
-                            dicom_data = part[dicom_start+4:].rstrip(b'\r\n-')
-                            if len(dicom_data) > 128:
-                                original_dicom = dcmread(io.BytesIO(dicom_data))
-                                break
+            for hex_tag, attr_name in tag_mapping.items():
+                tag_data = first_instance_meta.get(hex_tag)
+                if tag_data and tag_data.get("Value"):
+                    value = tag_data["Value"][0] if isinstance(tag_data["Value"], list) else tag_data["Value"]
 
-                if not original_dicom:
-                    raise Exception("No DICOM data found in WADO-RS response")
+                    # Special handling for PersonName (PN) VR - extract Alphabetic component
+                    if attr_name == "PatientName" and isinstance(value, dict):
+                        value = value.get("Alphabetic", "")
 
-                print(f"Retrieved sample DICOM via WADO-RS: {original_dicom.SOPInstanceUID}")
+                    setattr(original_dicom, attr_name, value)
 
-            except Exception as e:
-                raise Exception(f"Failed to retrieve sample DICOM via WADO-RS: {str(e)}")
+            print(f"Using spatially first instance with position {original_dicom.ImagePositionPatient}")
 
             # Update: Creating DICOM results
             workitem.update_state(
@@ -262,7 +252,8 @@ def process_workitem(workitem):
                         creation_date=current_date,
                         creation_time=current_time,
                         sr_sop_instance_uid=sr_sop_instance_uid,
-                        slice_spacing=1.0  # Would need to extract from DICOM
+                        slice_spacing=slice_spacing,  # Use calculated spacing as fallback
+                        positions_list=positions_list  # Use actual positions from sorted instances
                     )
                     dicom_objects_to_upload.append((sc_bytes, "SC-MultiFrame"))
 
