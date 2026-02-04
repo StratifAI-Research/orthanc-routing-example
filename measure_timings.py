@@ -449,8 +449,10 @@ def parse_timing_logs(profiler: TimingProfiler, container: str, logs: str):
         'odelia-orthanc-viewer': 'orthanc-viewer',
         'odelia-orthanc-router': 'orthanc-router',
         'odelia-orthanc-router-mst': 'orthanc-router-mst',
+        'odelia-orthanc-router-medgemma': 'orthanc-router-medgemma',
         'odelia-breast-cancer-classification': 'ml-breast-cancer',
-        'odelia-mst-classifier': 'ml-mst'
+        'odelia-mst-classifier': 'ml-mst',
+        'odelia-medgemma-mri': 'ml-medgemma'
     }
 
     component = component_map.get(container, container)
@@ -549,6 +551,9 @@ Examples:
   # Profile MST model
   python measure_timings.py --study-id abc123 --target orthanc-router-mst
 
+  # Profile MedGemma model
+  python measure_timings.py --study-id abc123 --target orthanc-router-medgemma
+
   # Compare deletion overhead (run both):
   python measure_timings.py --study-id abc123 --target orthanc-router --delete-before-send
   python measure_timings.py --study-id abc123 --target orthanc-router
@@ -564,7 +569,7 @@ Examples:
     parser.add_argument(
         '--target',
         default='orthanc-router',
-        help='Target AI router (orthanc-router or orthanc-router-mst)'
+        help='Target AI router (orthanc-router, orthanc-router-mst, or orthanc-router-medgemma)'
     )
 
     parser.add_argument(
@@ -614,7 +619,8 @@ Examples:
     if not args.target_url:
         target_map = {
             'orthanc-router': 'http://orthanc-router:8042/dicom-web',
-            'orthanc-router-mst': 'http://orthanc-router-mst:8042/dicom-web'
+            'orthanc-router-mst': 'http://orthanc-router-mst:8042/dicom-web',
+            'orthanc-router-medgemma': 'http://orthanc-router-medgemma:8042/dicom-web'
         }
         args.target_url = target_map.get(args.target, 'http://orthanc-router:8042/dicom-web')
 
@@ -652,7 +658,8 @@ Examples:
                 # Map target to localhost URL (script runs on host, not in Docker)
                 router_url_map = {
                     'orthanc-router': 'http://localhost:8042',
-                    'orthanc-router-mst': 'http://localhost:8043'
+                    'orthanc-router-mst': 'http://localhost:8043',
+                    'orthanc-router-medgemma': 'http://localhost:8044'
                 }
                 router_base_url = router_url_map.get(args.target, 'http://localhost:8042')
                 logger.info(f"Using router URL: {router_base_url}")
@@ -713,8 +720,10 @@ Examples:
                 'odelia-orthanc-viewer',
                 'odelia-orthanc-router',
                 'odelia-orthanc-router-mst',
+                'odelia-orthanc-router-medgemma',
                 'odelia-breast-cancer-classification',
-                'odelia-mst-classifier'
+                'odelia-mst-classifier',
+                'odelia-medgemma-mri'
             ]
 
             fetch_component_logs(profiler, containers)
