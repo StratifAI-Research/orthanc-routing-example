@@ -1,0 +1,2 @@
+trace_id,timestamp,component,operation,duration_ms,metadata
+3e36fb91-4ccb-4841-b416-69e31e92519b,2026-01-19T09:55:20.288314,orthanc-viewer,send_to_ai (total),2495.91,"{""study_id"": ""e785dcef-6a9785a0-289afe7d-f686879e-18706f29"", ""target"": ""orthanc-router-medgemma"", ""status_code"": 200}"
