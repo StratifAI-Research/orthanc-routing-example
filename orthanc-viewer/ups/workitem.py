@@ -163,6 +163,46 @@ class UPSWorkitem:
                     })
         return urls
 
+    def get_input_mapping(self):
+        """
+        Parse Scheduled Processing Parameters (0074,1210) back into a
+        structured mapping: {role_key: series_uid}.
+        Returns None if no structured mapping is present (legacy workitem).
+        """
+        proc_params = self.data.get("00741210", {}).get("Value", [])
+        if not proc_params:
+            return None
+
+        mapping = {}
+        config_id = None
+
+        for item in proc_params:
+            value_type = item.get("0040A040", {}).get("Value", [None])[0]
+            concept_seq = item.get("0040A043", {}).get("Value", [{}])
+            if not concept_seq:
+                continue
+            concept = concept_seq[0]
+            coding_scheme = concept.get("00080102", {}).get("Value", [None])[0]
+
+            if coding_scheme != "99ODELIA":
+                continue
+
+            code_value = concept.get("00080100", {}).get("Value", [None])[0]
+            if not code_value:
+                continue
+
+            if value_type == "UIDREF":
+                uid = item.get("0040A124", {}).get("Value", [None])[0]
+                if uid:
+                    mapping[code_value] = uid
+            elif value_type == "TEXT" and code_value == "inputConfigId":
+                config_id = item.get("0040A160", {}).get("Value", [None])[0]
+
+        if not mapping:
+            return None
+
+        return {"mapping": mapping, "input_configuration_id": config_id}
+
     def get_study_uid(self):
         """Get StudyInstanceUID"""
         return self.data.get("0020000D", {}).get("Value", [None])[0]

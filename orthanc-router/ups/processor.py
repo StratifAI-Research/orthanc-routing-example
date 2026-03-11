@@ -103,9 +103,8 @@ def process_workitem(workitem):
         ups_storage.store_workitem(workitem)
         notify_all_subscribers(workitem)
 
-        # Step 3: Call AI model with WADO-RS URLs
+        # Step 3: Call AI model with WADO-RS URLs (and structured input mapping if present)
         try:
-            # Update: Sending data to AI model
             workitem.update_state(
                 "IN_PROGRESS",
                 progress_percent=30,
@@ -114,13 +113,41 @@ def process_workitem(workitem):
             ups_storage.store_workitem(workitem)
             notify_all_subscribers(workitem)
 
+            # Build request body for the model backend
+            model_request_body = {
+                "wado_rs_retrieval": wado_rs_urls,
+                "study_uid": study_uid
+            }
+
+            # Extract structured input mapping from workitem (if present)
+            structured_input = workitem.get_input_mapping()
+            if structured_input:
+                role_mapping = structured_input["mapping"]
+                config_id = structured_input.get("input_configuration_id")
+                print(f"Structured input mapping found: config={config_id}, roles={list(role_mapping.keys())}")
+
+                wado_rs_by_series = {}
+                for item in wado_rs_urls:
+                    wado_rs_by_series[item["series_uid"]] = item["retrieval_url"]
+
+                input_mapping_for_model = {}
+                for role_key, series_uid in role_mapping.items():
+                    input_mapping_for_model[role_key] = {
+                        "series_uid": series_uid,
+                        "study_uid": study_uid,
+                        "wado_rs_url": wado_rs_by_series.get(series_uid)
+                    }
+
+                model_request_body["input_mapping"] = input_mapping_for_model
+                if config_id:
+                    model_request_body["input_configuration_id"] = config_id
+            else:
+                print("No structured input mapping in workitem, using flat WADO-RS URLs")
+
             step_start = time.time()
             model_response = requests.post(
                 f"{MODEL_BACKEND_URL}/analyze/mri",
-                json={
-                    "wado_rs_retrieval": wado_rs_urls,
-                    "study_uid": study_uid
-                },
+                json=model_request_body,
                 timeout=1000,
             )
             step_duration = (time.time() - step_start) * 1000

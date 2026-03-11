@@ -4,12 +4,15 @@ Implements DICOM PS3.18 Section 11 (UPS-RS)
 """
 
 import json
+import os
 import orthanc
 import threading
 
 from ups.workitem import UPSWorkitem
 from ups.storage import ups_storage
 from ups.processor import process_workitem
+
+MANIFEST_PATH = os.environ.get("AI_MANIFEST_PATH", "/etc/orthanc/manifest.json")
 
 
 def CreateWorkitem(output, uri, **request):
@@ -39,6 +42,8 @@ def CreateWorkitem(output, uri, **request):
         series_uids = body.get("series_uids", [])
         wado_rs_base = body.get("wado_rs_base", "http://orthanc-viewer:8042/dicom-web")
         priority = body.get("priority", "MEDIUM")
+        input_mapping = body.get("input_mapping")
+        input_configuration_id = body.get("input_configuration_id")
 
         if not study_uid:
             output.SendHttpStatus(400, "Missing study_uid in request body")
@@ -54,12 +59,14 @@ def CreateWorkitem(output, uri, **request):
                 "series_uid": series_uid
             })
 
-        # Create workitem
+        # Create workitem (with optional structured input mapping)
         workitem = UPSWorkitem(
             study_uid=study_uid,
             series_uids=series_uids,
             wado_rs_retrieval=wado_rs_retrieval,
-            priority=priority
+            priority=priority,
+            input_mapping=input_mapping,
+            input_configuration_id=input_configuration_id
         )
 
         print(f"CreateWorkitem: Created workitem with UID: {workitem.workitem_uid}")
@@ -324,6 +331,31 @@ def UnsubscribeFromWorkitem(output, uri, **request):
         output.SendHttpStatus(500, error_message)
 
 
+def ServeManifest(output, uri, **request):
+    """
+    GET /manifest
+    Serve the model input manifest (if mounted).
+    Returns 404 when no manifest is available, allowing the viewer to fall back
+    to flat series selection.
+    """
+    if request["method"] != "GET":
+        output.SendMethodNotAllowed("GET")
+        return
+
+    if not os.path.isfile(MANIFEST_PATH):
+        output.SendHttpStatus(404, "No manifest available")
+        return
+
+    try:
+        with open(MANIFEST_PATH, "r") as f:
+            manifest_data = f.read()
+        json.loads(manifest_data)  # validate JSON
+        output.AnswerBuffer(manifest_data, "application/json")
+    except (json.JSONDecodeError, IOError) as e:
+        print(f"Error reading manifest: {e}")
+        output.SendHttpStatus(500, f"Error reading manifest: {e}")
+
+
 # Helper to register all UPS routes
 def register_ups_routes():
     """Register all UPS-RS REST endpoints"""
@@ -332,5 +364,6 @@ def register_ups_routes():
     orthanc.RegisterRestCallback('/ups-rs/workitems/([0-9.]+)/state$', UpdateWorkitemState)
     orthanc.RegisterRestCallback('/ups-rs/workitems/([0-9.]+)/subscribers$', SubscribeToWorkitem)
     orthanc.RegisterRestCallback('/ups-rs/workitems/([0-9.]+)/subscribers/(.+)$', UnsubscribeFromWorkitem)
+    orthanc.RegisterRestCallback('/manifest$', ServeManifest)
 
-    print("UPS-RS REST endpoints registered")
+    print("UPS-RS REST endpoints registered (including /manifest)")

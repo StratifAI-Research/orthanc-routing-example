@@ -361,9 +361,11 @@ def SendToAiDicomWeb(output, uri, **request):
         target = body.get("target")
         target_url = body.get("target_url")
         series_uids = body.get("series_uids")  # Optional: filter by specific series
+        input_mapping = body.get("input_mapping")  # Structured role-to-series mapping
+        input_configuration_id = body.get("input_configuration_id")
 
         print(
-            f"SendToAiDicomWeb: Request parameters - study_id: {study_id}, target: {target}, target_url: {target_url}, series_uids: {len(series_uids) if series_uids else 0}"
+            f"SendToAiDicomWeb: Request parameters - study_id: {study_id}, target: {target}, target_url: {target_url}, series_uids: {len(series_uids) if series_uids else 0}, input_mapping: {input_mapping is not None}"
         )
 
         if not study_id or not target:
@@ -520,6 +522,11 @@ def SendToAiDicomWeb(output, uri, **request):
                     "wado_rs_base": "http://orthanc-viewer:8042/dicom-web",
                     "priority": "MEDIUM"
                 }
+
+                if input_mapping:
+                    ups_workitem_request["input_mapping"] = input_mapping
+                if input_configuration_id:
+                    ups_workitem_request["input_configuration_id"] = input_configuration_id
 
                 post_url = f"{router_base_url}/ups-rs/workitems"
                 print(f"SendToAiDicomWeb: Creating UPS workitem on router at {post_url}")
@@ -689,10 +696,50 @@ def UPSWorkitemHandler(output, uri, **request):
         output.SendMethodNotAllowed("GET, POST")
 
 
+def GetAIManifest(output, uri, **request):
+    """
+    GET /ai-manifest?target_url=http://orthanc-router:8042/dicom-web
+    Proxy the model input manifest from the target router.
+    Returns {"manifest": null} when the router has no manifest (404 / unreachable).
+    """
+    if request["method"] != "GET":
+        output.SendMethodNotAllowed("GET")
+        return
+
+    try:
+        get_params = request.get("get", {})
+        target_url = get_params.get("target_url", [None])
+        if isinstance(target_url, list):
+            target_url = target_url[0]
+
+        if not target_url:
+            output.SendHttpStatus(400, "Missing target_url query parameter")
+            return
+
+        router_base_url = target_url.replace("/dicom-web", "").rstrip("/")
+        manifest_url = f"{router_base_url}/manifest"
+        print(f"GetAIManifest: Fetching manifest from {manifest_url}")
+
+        resp = requests.get(manifest_url, timeout=5)
+        if resp.status_code == 200:
+            output.AnswerBuffer(resp.text, "application/json")
+        else:
+            print(f"GetAIManifest: Router returned {resp.status_code}, returning null manifest")
+            output.AnswerBuffer(json.dumps({"manifest": None}), "application/json")
+
+    except requests.exceptions.RequestException as e:
+        print(f"GetAIManifest: Connection error to router: {e}")
+        output.AnswerBuffer(json.dumps({"manifest": None}), "application/json")
+    except Exception as e:
+        print(f"GetAIManifest: Unexpected error: {e}")
+        output.AnswerBuffer(json.dumps({"manifest": None}), "application/json")
+
+
 # Register the REST endpoints
 orthanc.RegisterRestCallback("/send-to-ai", SendToAi)
 orthanc.RegisterRestCallback("/send-to-ai-dicom", SendToAiDicom)
 orthanc.RegisterRestCallback("/send-to-ai-dicomweb", SendToAiDicomWeb)
+orthanc.RegisterRestCallback("/ai-manifest", GetAIManifest)
 
 # Register UPS-RS endpoints for receiving workitem updates
 orthanc.RegisterRestCallback("/ups-rs/workitems/(.*)", UPSWorkitemHandler)
